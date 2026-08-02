@@ -1,0 +1,9 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=8765

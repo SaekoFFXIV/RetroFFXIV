@@ -1,0 +1,13 @@
+{
+  "Author": "RetroFFXIV",
+  "Name": "EmulatorStream",
+  "Description": "Shared streaming library for emulator plugins",
+  "Punchline": "Stream and spectate emulator games in FFXIV",
+  "InternalName": "EmulatorStream",
+  "AssemblyVersion": "0.1.0.0",
+  "RepoUrl": "",
+  "Tags": [],
+  "CategoryTags": [],
+  "IsHide": true,
+  "DalamudApiLevel": 15
+}
