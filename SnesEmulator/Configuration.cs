@@ -67,7 +67,7 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     public StreamConfig GetStreamConfig() => new()
     {
         RelayUrl = RelayUrl,
-        PlayerUid = PlayerUid,
+        PlayerUid = !string.IsNullOrEmpty(PlayerPersistentKey) ? PlayerPersistentKey : PlayerUid,
         ScreenWidth = ScreenWidth,
         ScreenHeight = ScreenHeight,
         ScreenOpacity = ScreenOpacity,
