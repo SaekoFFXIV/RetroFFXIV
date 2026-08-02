@@ -13,6 +13,7 @@ internal sealed class NetplayPanel : IDisposable
     private readonly Action<string> log;
     private readonly Func<RetroCore?> getCore;
     private readonly InputManager inputManager;
+    private readonly Func<string> getPlayerUid;
 
     private NetplaySession? session;
     private string joinCode = string.Empty;
@@ -27,12 +28,14 @@ internal sealed class NetplayPanel : IDisposable
         Configuration config,
         Action<string> log,
         Func<RetroCore?> getCore,
-        InputManager inputManager)
+        InputManager inputManager,
+        Func<string> getPlayerUid)
     {
         this.config = config;
         this.log = log;
         this.getCore = getCore;
         this.inputManager = inputManager;
+        this.getPlayerUid = getPlayerUid;
         relayUrl = config.RelayUrl;
     }
 
@@ -105,7 +108,7 @@ internal sealed class NetplayPanel : IDisposable
     private void StartSession(bool host)
     {
         session?.Dispose();
-        session = new NetplaySession(relayUrl, config.PlayerUid, log);
+        session = new NetplaySession(relayUrl, getPlayerUid(), log);
         session.StateChanged += OnSessionStateChanged;
 
         if (host)

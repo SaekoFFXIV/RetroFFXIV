@@ -48,6 +48,15 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     public string RelayUrl { get; set; } = "wss://relay.nekomail.cc";
     public string PlayerUid { get; set; } = System.Guid.NewGuid().ToString("N");
 
+    // XIVAuth identity.
+    public string XivAuthAccessToken { get; set; } = string.Empty;
+    public string XivAuthRefreshToken { get; set; } = string.Empty;
+    public long XivAuthTokenExpiry { get; set; }
+    public string PlayerPersistentKey { get; set; } = string.Empty;
+    public string PlayerCharacterName { get; set; } = string.Empty;
+    public long PlayerLodestoneId { get; set; }
+    public string PlayerWorld { get; set; } = string.Empty;
+
     // World screen placement.
     public float ScreenWidth { get; set; } = 1.5f; // yalms
     public float ScreenHeight { get; set; } = 1.2f; // yalms above ground

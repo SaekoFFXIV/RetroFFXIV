@@ -79,6 +79,7 @@ public sealed class EmulatorService : IDisposable
     private readonly IFramework framework;
     private readonly CoreManager coreManager;
     private CoreInfo? selectedCore;
+    private readonly XivAuthService xivAuth;
     private StreamPanel? streamPanel;
     private NetplayPanel? netplayPanel;
     private WorldScreenRenderer? worldScreen;
@@ -133,6 +134,7 @@ public sealed class EmulatorService : IDisposable
         selectedCore ??= coreManager.GetDefault();
 
         romBrowser = new RomBrowser(config, SelectRom, GetRomExtensions);
+        xivAuth = new XivAuthService(config, msg => log.Information("[XIVAuth] {Msg}", msg));
         streamPanel = new StreamPanel(
             config.GetStreamConfig(), textureProvider,
             msg => log.Information("[Stream] {Msg}", msg),
@@ -142,7 +144,8 @@ public sealed class EmulatorService : IDisposable
             config,
             msg => log.Information("[Netplay] {Msg}", msg),
             () => core,
-            inputManager);
+            inputManager,
+            xivAuth.GetPlayerUid);
         worldScreen = new WorldScreenRenderer(
             gameGui, textureProvider, config.GetStreamConfig(),
             () => objectTable.LocalPlayer?.Position,
@@ -552,6 +555,10 @@ public sealed class EmulatorService : IDisposable
 
             if (ImGui.BeginTabItem("Online"))
             {
+                DrawIdentitySection();
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
                 streamPanel?.DrawTab();
                 ImGui.Spacing();
                 ImGui.Separator();
@@ -1294,6 +1301,49 @@ public sealed class EmulatorService : IDisposable
         audio = null;
     }
 
+    private void DrawIdentitySection()
+    {
+        ImGui.TextUnformatted("Player identity");
+
+        if (xivAuth.IsLoggedIn)
+        {
+            ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), $"{config.PlayerCharacterName} ({config.PlayerWorld})");
+            ImGui.TextDisabled($"Lodestone ID: {config.PlayerLodestoneId}");
+
+            if (ImGui.Button("Log out"))
+            {
+                xivAuth.Logout();
+                SaveConfig();
+            }
+        }
+        else if (xivAuth.IsPolling)
+        {
+            ImGui.TextWrapped(xivAuth.Status);
+            ImGui.Spacing();
+            ImGui.TextUnformatted($"Code: {xivAuth.UserCode}");
+            ImGui.TextWrapped($"Open: {xivAuth.VerificationUrl}");
+
+            if (ImGui.Button("Cancel"))
+            {
+                xivAuth.Logout();
+            }
+        }
+        else
+        {
+            ImGui.TextWrapped("Log in with XIVAuth to use your FFXIV character as your player identity for netplay and streaming.");
+
+            if (ImGui.Button("Log in with XIVAuth"))
+            {
+                _ = System.Threading.Tasks.Task.Run(xivAuth.StartLoginAsync);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(xivAuth.Error))
+        {
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), xivAuth.Error);
+        }
+    }
+
     private void DrawWorldScreenSection()
     {
         if (worldScreen == null) return;
@@ -1395,6 +1445,7 @@ public sealed class EmulatorService : IDisposable
     {
         AutoSave();
         framework.Update -= OnFrameworkUpdate;
+        xivAuth.Dispose();
         streamPanel?.Dispose();
         streamPanel = null;
         netplayPanel?.Dispose();
