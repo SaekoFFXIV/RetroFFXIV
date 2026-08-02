@@ -559,6 +559,10 @@ public sealed class EmulatorService : IDisposable
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Spacing();
+                DrawSyncSection();
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
                 streamPanel?.DrawTab();
                 ImGui.Spacing();
                 ImGui.Separator();
@@ -1341,6 +1345,125 @@ public sealed class EmulatorService : IDisposable
         if (!string.IsNullOrEmpty(xivAuth.Error))
         {
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), xivAuth.Error);
+        }
+    }
+
+    private string syncKeyInput = string.Empty;
+    private string syncNameInput = string.Empty;
+
+    private void DrawSyncSection()
+    {
+        ImGui.TextUnformatted("Sync");
+
+        if (!xivAuth.IsLoggedIn)
+        {
+            ImGui.TextWrapped("Log in with XIVAuth above to go live and sync with friends.");
+            return;
+        }
+
+        // Go live / stop live.
+        if (streamPanel is { IsLive: true })
+        {
+            var host = streamPanel.GetStreamHost();
+            ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), "LIVE");
+            ImGui.SameLine();
+            ImGui.TextWrapped(host?.Status ?? "");
+
+            if (ImGui.Button("Stop streaming", new Vector2(-1, 0)))
+            {
+                streamPanel.StopLive();
+            }
+        }
+        else
+        {
+            var backend = core;
+            if (backend is { IsGameLoaded: true })
+            {
+                if (ImGui.Button("Go live", new Vector2(-1, 0)))
+                {
+                    streamPanel?.GoLive(xivAuth.GetPlayerUid(), config.PlayerCharacterName);
+                }
+            }
+            else
+            {
+                ImGui.TextWrapped("Load a game to go live. Friends with your key can watch your world screen.");
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // Friend list.
+        ImGui.TextUnformatted("Synced friends");
+
+        if (config.SyncFriends.Count == 0)
+        {
+            ImGui.TextWrapped("No friends synced yet. Add a friend's XIVAuth key to watch their stream.");
+        }
+
+        int? removeIndex = null;
+        string? watchKey = null;
+
+        for (var i = 0; i < config.SyncFriends.Count; i++)
+        {
+            var friend = config.SyncFriends[i];
+            var label = string.IsNullOrEmpty(friend.Name) ? friend.Key[..Math.Min(12, friend.Key.Length)] + "..." : friend.Name;
+
+            ImGui.TextUnformatted(label);
+            ImGui.SameLine();
+
+            if (streamPanel is { IsSubscribed: true } && streamPanel.GetStreamClient()?.SubscribedUid == friend.Key)
+            {
+                if (ImGui.SmallButton($"Stop##friend{i}"))
+                {
+                    streamPanel.Unsubscribe();
+                }
+            }
+            else
+            {
+                if (ImGui.SmallButton($"Watch##friend{i}"))
+                {
+                    watchKey = friend.Key;
+                }
+            }
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"X##friend{i}"))
+            {
+                removeIndex = i;
+            }
+        }
+
+        if (removeIndex.HasValue)
+        {
+            config.SyncFriends.RemoveAt(removeIndex.Value);
+            SaveConfig();
+        }
+
+        if (watchKey != null)
+        {
+            streamPanel?.SubscribeToPlayer(watchKey);
+        }
+
+        ImGui.Spacing();
+
+        // Add friend.
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##synckey", "XIVAuth key", ref syncKeyInput, 256);
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##syncname", "Name (optional)", ref syncNameInput, 128);
+
+        if (ImGui.Button("Add friend") && !string.IsNullOrWhiteSpace(syncKeyInput))
+        {
+            config.SyncFriends.Add(new SyncFriend
+            {
+                Key = syncKeyInput.Trim(),
+                Name = syncNameInput.Trim(),
+            });
+            syncKeyInput = string.Empty;
+            syncNameInput = string.Empty;
+            SaveConfig();
         }
     }
 

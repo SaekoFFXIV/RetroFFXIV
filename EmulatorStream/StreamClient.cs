@@ -35,6 +35,8 @@ public sealed class StreamClient : IDisposable
 
     public bool IsConnected { get; private set; }
     public string? RoomCode { get; private set; }
+    public string? SubscribedUid { get; private set; }
+    public string? SubscribedName { get; private set; }
     public string Status { get; private set; } = "Idle";
 
     public event Action? StateChanged;
@@ -114,6 +116,89 @@ public sealed class StreamClient : IDisposable
 
         Cleanup();
         RoomCode = null;
+        Status = "Idle";
+        StateChanged?.Invoke();
+    }
+
+    // Identity-based: subscribe to a player's live stream by their persistent_key.
+    public async Task SubscribeAsync(string uid)
+    {
+        if (IsConnected)
+            return;
+
+        cts = new CancellationTokenSource();
+        var token = cts.Token;
+
+        Status = "Connecting...";
+        StateChanged?.Invoke();
+
+        ws = new ClientWebSocket();
+        try
+        {
+            var uri = new Uri(relayUrl.TrimEnd('/') + "/ws");
+            await ws.ConnectAsync(uri, token);
+        }
+        catch (Exception ex)
+        {
+            Status = $"Connection failed: {ex.Message}";
+            StateChanged?.Invoke();
+            Cleanup();
+            return;
+        }
+
+        var json = new ControlMsg { Action = "subscribe", Uid = uid }.ToJson();
+        await ws.SendAsync(
+            new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
+            WebSocketMessageType.Text, true, token);
+
+        var buffer = new byte[4096];
+        var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+        if (result.MessageType == WebSocketMessageType.Text)
+        {
+            var msg = ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count));
+            if (msg?.Type == "subscribed")
+            {
+                SubscribedUid = uid;
+                SubscribedName = msg.Name;
+                IsConnected = true;
+                Status = $"Watching {SubscribedName ?? uid[..Math.Min(8, uid.Length)]}";
+                log($"Subscribed to live stream: {SubscribedName} ({uid[..Math.Min(8, uid.Length)]})");
+            }
+            else
+            {
+                Status = $"Subscribe failed: {msg?.Message ?? "player is not live"}";
+                StateChanged?.Invoke();
+                Cleanup();
+                return;
+            }
+        }
+
+        StateChanged?.Invoke();
+
+        decoder = new H264Decoder();
+        receiveLoop = Task.Run(() => ReceiveLoopAsync(token), token);
+    }
+
+    public async Task UnsubscribeAsync()
+    {
+        if (!IsConnected || SubscribedUid == null)
+            return;
+
+        try
+        {
+            if (ws is { State: WebSocketState.Open })
+            {
+                var json = new ControlMsg { Action = "unsubscribe" }.ToJson();
+                await ws.SendAsync(
+                    new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
+                    WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+        }
+        catch { }
+
+        Cleanup();
+        SubscribedUid = null;
+        SubscribedName = null;
         Status = "Idle";
         StateChanged?.Invoke();
     }
@@ -247,10 +332,12 @@ public sealed class StreamClient : IDisposable
     private void HandleControl(string json)
     {
         var msg = ControlMsg.Parse(json);
-        if (msg?.Type == "closed")
+        if (msg?.Type is "closed" or "live_ended")
         {
             IsConnected = false;
-            Status = "Host ended the stream";
+            Status = msg.Type == "live_ended" ? "Player stopped streaming" : "Host ended the stream";
+            SubscribedUid = null;
+            SubscribedName = null;
             StateChanged?.Invoke();
             Cleanup();
         }

@@ -107,6 +107,23 @@ public sealed class ControlMsg
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Collections.Generic.List<NetplayPlayerInfo>? Players { get; set; }
 
+    // Live streaming fields.
+    [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("keys")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public System.Collections.Generic.List<string>? Keys { get; set; }
+
+    [JsonPropertyName("live")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public System.Collections.Generic.List<LivePlayerInfo>? Live { get; set; }
+
+    [JsonPropertyName("subscribers")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Subscribers { get; set; }
+
     public static ControlMsg? Parse(string json)
     {
         try { return JsonSerializer.Deserialize<ControlMsg>(json); }
@@ -123,4 +140,16 @@ public sealed class NetplayPlayerInfo
 
     [JsonPropertyName("slot")]
     public int Slot { get; set; }
+}
+
+public sealed class LivePlayerInfo
+{
+    [JsonPropertyName("uid")]
+    public string Uid { get; set; } = "";
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    [JsonPropertyName("viewers")]
+    public int Viewers { get; set; }
 }

@@ -32,6 +32,7 @@ public sealed class StreamHost : IDisposable
     public string? RoomCode { get; private set; }
     public int ViewerCount { get; private set; }
     public bool IsHosting { get; private set; }
+    public bool IsLive { get; private set; }
     public string Status { get; private set; } = "Idle";
     public string VideoStatus { get; private set; } = "Not started";
 
@@ -126,6 +127,87 @@ public sealed class StreamHost : IDisposable
 
         Cleanup();
         RoomCode = null;
+        ViewerCount = 0;
+        Status = "Idle";
+        StateChanged?.Invoke();
+    }
+
+    // Identity-based streaming: go live with a persistent_key instead of a room code.
+    public async Task GoLiveAsync(string uid, string name)
+    {
+        if (IsHosting || IsLive)
+            return;
+
+        cts = new CancellationTokenSource();
+        var token = cts.Token;
+
+        Status = "Connecting...";
+        StateChanged?.Invoke();
+
+        ws = new ClientWebSocket();
+        try
+        {
+            var uri = new Uri(relayUrl.TrimEnd('/') + "/ws");
+            await ws.ConnectAsync(uri, token);
+        }
+        catch (Exception ex)
+        {
+            Status = $"Connection failed: {ex.Message}";
+            StateChanged?.Invoke();
+            Cleanup();
+            return;
+        }
+
+        await SendControlAsync(new ControlMsg { Action = "go_live", Uid = uid, Name = name }, token);
+
+        var response = await ReceiveControlAsync(token);
+        if (response?.Type == "live_started")
+        {
+            IsLive = true;
+            IsHosting = true;
+            ViewerCount = response.Subscribers ?? 0;
+            Status = $"Live as {name} — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
+            log($"Went live: uid={uid[..Math.Min(8, uid.Length)]}, name={name}");
+        }
+        else
+        {
+            Status = $"Failed to go live: {response?.Message ?? "unknown error"}";
+            StateChanged?.Invoke();
+            Cleanup();
+            return;
+        }
+
+        StateChanged?.Invoke();
+
+        var info = StreamProtocol.PackStreamInfo(
+            backend.BaseWidth * StreamScale,
+            backend.BaseHeight * StreamScale,
+            StreamFps,
+            (int)backend.SampleRate);
+        await SendBinaryAsync(info, token);
+
+        sendLoop = Task.Run(() => VideoLoopAsync(token), token);
+        audioLoop = Task.Run(() => AudioLoopAsync(token), token);
+        _ = Task.Run(() => ControlLoopAsync(token), token);
+    }
+
+    public async Task StopLiveAsync()
+    {
+        if (!IsLive)
+            return;
+
+        Status = "Stopping...";
+        StateChanged?.Invoke();
+
+        try
+        {
+            if (ws is { State: WebSocketState.Open })
+                await SendControlAsync(new ControlMsg { Action = "stop_live" }, CancellationToken.None);
+        }
+        catch { }
+
+        Cleanup();
+        IsLive = false;
         ViewerCount = 0;
         Status = "Idle";
         StateChanged?.Invoke();
@@ -258,7 +340,9 @@ public sealed class StreamHost : IDisposable
                     {
                         var prev = ViewerCount;
                         ViewerCount = msg.Count.Value;
-                        Status = $"Hosting — room {RoomCode} — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
+                        Status = IsLive
+                            ? $"Live — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}"
+                            : $"Hosting — room {RoomCode} — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
                         // Force a keyframe so new/rejoining spectators can decode immediately.
                         if (ViewerCount > prev)
                             encoder?.ForceKeyFrame();
@@ -367,6 +451,7 @@ public sealed class StreamHost : IDisposable
         }
 
         IsHosting = false;
+        IsLive = false;
     }
 
     public void Dispose()

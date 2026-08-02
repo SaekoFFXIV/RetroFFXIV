@@ -26,6 +26,12 @@ public enum InputMode
     Controller,
 }
 
+public sealed class SyncFriend
+{
+    public string Key { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+}
+
 public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
 {
     public int Version { get; set; } = 1;
@@ -56,6 +62,9 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     public string PlayerCharacterName { get; set; } = string.Empty;
     public long PlayerLodestoneId { get; set; }
     public string PlayerWorld { get; set; } = string.Empty;
+
+    // Sync friends (XIVAuth persistent_keys + display names).
+    public List<SyncFriend> SyncFriends { get; set; } = new();
 
     // World screen placement.
     public float ScreenWidth { get; set; } = 1.5f; // yalms

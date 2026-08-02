@@ -32,9 +32,12 @@ public sealed class StreamPanel : IDisposable
     private bool showViewerWindow;
 
     public bool IsHosting => host?.IsHosting == true;
+    public bool IsLive => host?.IsLive == true;
     public bool IsSpectating => client?.IsConnected == true;
+    public bool IsSubscribed => client?.SubscribedUid != null;
     public bool UseWorldScreen => useWorldScreen;
     public StreamClient? GetStreamClient() => client;
+    public StreamHost? GetStreamHost() => host;
     public bool ShowViewerWindow
     {
         get => showViewerWindow;
@@ -222,6 +225,45 @@ public sealed class StreamPanel : IDisposable
         {
             log($"Viewer texture error: {ex.Message}");
         }
+    }
+
+    // --- Identity-based streaming (sync) ---
+
+    public void GoLive(string uid, string name)
+    {
+        var backend = getBackend();
+        if (backend is not { IsGameLoaded: true })
+            return;
+
+        host?.Dispose();
+        host = new StreamHost(backend, relayUrl, log);
+        host.StateChanged += () => { };
+        _ = Task.Run(() => host.GoLiveAsync(uid, name));
+    }
+
+    public void StopLive()
+    {
+        if (host is { IsLive: true })
+            _ = Task.Run(() => host.StopLiveAsync());
+    }
+
+    public void SubscribeToPlayer(string uid)
+    {
+        client?.Dispose();
+        client = new StreamClient(relayUrl, log);
+        client.StateChanged += () =>
+        {
+            if (client.IsConnected && !useWorldScreen)
+                showViewerWindow = true;
+        };
+        _ = Task.Run(() => client.SubscribeAsync(uid));
+    }
+
+    public void Unsubscribe()
+    {
+        showViewerWindow = false;
+        if (client != null)
+            _ = Task.Run(() => client.UnsubscribeAsync());
     }
 
     public void Dispose()
