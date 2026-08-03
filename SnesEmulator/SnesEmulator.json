@@ -3,6 +3,7 @@
   "Name": "RetroFFXIV",
   "Punchline": "Play retro games inside FFXIV.",
   "Description": "A multi-core libretro emulator embedded in a Dalamud window. Drop any libretro core into the cores/ folder — SNES, GBA, Genesis, and more. Keyboard and controller support, configurable key bindings, resolution scaling, CRT effects, friend spectating, and netplay.",
+  "RepoUrl": "https://github.com/SaekoFFXIV/RetroFFXIV",
   "ApplicableVersion": "any",
   "Tags": [
     "emulator",
