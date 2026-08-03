@@ -307,6 +307,7 @@ public sealed class EmulatorService : IDisposable
     public void DrawMainWindow(ref bool show)
     {
         EnsureCoreLoaded();
+        UpdatePresence();
         if (screenOn)
         {
             UpdateTexture();
@@ -1648,6 +1649,29 @@ public sealed class EmulatorService : IDisposable
     }
 
     private string syncFilter = string.Empty;
+
+    // Presence is independent of the currently visible control-deck tab. The
+    // Friends tab still needs the global online list after the Sync UI was
+    // split out, so keep this lifecycle with the main plugin window rather
+    // than the old Sync-tab renderer.
+    private void UpdatePresence()
+    {
+        var uid = xivAuth.GetPlayerUid();
+        var registered = xivAuth.IsLoggedIn
+            && !string.IsNullOrEmpty(config.PlayerId)
+            && config.PlayerIdUid == uid;
+
+        if (registered)
+        {
+            presence?.Start(
+                streamPanel?.RelayUrl ?? config.RelayUrl,
+                uid, config.PlayerId, config.PlayerCharacterName);
+        }
+        else
+        {
+            presence?.Stop();
+        }
+    }
 
     private void DrawSyncSection()
     {
