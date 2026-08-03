@@ -16,3 +16,4 @@ packages/
 ## Relay runtime state
 relay/registry.json
 relay/data/
+relay/__pycache__/
