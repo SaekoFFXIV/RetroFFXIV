@@ -8,6 +8,7 @@ using Dalamud.Plugin.Services;
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using SnesEmulator.Emulation;
@@ -77,12 +78,25 @@ public sealed class EmulatorService : IDisposable
     private readonly InputManager inputManager;
     private readonly RomBrowser romBrowser;
     private readonly IFramework framework;
+    private readonly IGameGui gameGui;
+    private readonly IObjectTable objectTable;
     private readonly CoreManager coreManager;
     private CoreInfo? selectedCore;
     private readonly XivAuthService xivAuth;
+    private readonly StreamConfig streamConfig;
     private StreamPanel? streamPanel;
     private NetplayPanel? netplayPanel;
     private WorldScreenRenderer? worldScreen;
+
+    // One world screen per watched stream, keyed by player ID.
+    private readonly System.Collections.Generic.Dictionary<string, WorldScreenRenderer> watchScreens = new();
+    private readonly System.Collections.Generic.Dictionary<string, long> watchVersions = new();
+
+    // Live presence for synced friends (polled via sync_check).
+    private readonly System.Collections.Generic.Dictionary<string, LivePlayerInfo> liveStatus = new();
+    private DateTime lastSyncCheck = DateTime.MinValue;
+    private bool syncCheckInFlight;
+    private string? watchError;
 
     private RetroCore? core;
     private AudioPlayer? audio;
@@ -120,6 +134,8 @@ public sealed class EmulatorService : IDisposable
         this.log = log;
         this.inputManager = inputManager;
         this.framework = framework;
+        this.gameGui = gameGui;
+        this.objectTable = objectTable;
 
         var pluginDir = pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty;
         coreManager = new CoreManager(
@@ -134,9 +150,10 @@ public sealed class EmulatorService : IDisposable
         selectedCore ??= coreManager.GetDefault();
 
         romBrowser = new RomBrowser(config, SelectRom, GetRomExtensions);
-        xivAuth = new XivAuthService(config, msg => log.Information("[XIVAuth] {Msg}", msg));
+        xivAuth = new XivAuthService(config, msg => log.Information("[XIVAuth] {Msg}", msg), SaveConfig);
+        streamConfig = config.GetStreamConfig();
         streamPanel = new StreamPanel(
-            config.GetStreamConfig(), textureProvider,
+            streamConfig, textureProvider,
             msg => log.Information("[Stream] {Msg}", msg),
             () => core,
             () => pluginInterface.SavePluginConfig(config));
@@ -147,22 +164,31 @@ public sealed class EmulatorService : IDisposable
             inputManager,
             xivAuth.GetPlayerUid);
         worldScreen = new WorldScreenRenderer(
-            gameGui, textureProvider, config.GetStreamConfig(),
-            () => objectTable.LocalPlayer?.Position,
-            () => objectTable.LocalPlayer?.Rotation ?? 0f,
-            () =>
+            gameGui, textureProvider, streamConfig,
+            GetPlayerPos, GetPlayerRot, GetNearbyPlayerPositions,
+            config.ScreenPosition,
+            pos =>
             {
-                var positions = new System.Collections.Generic.List<Vector3>();
-                var local = objectTable.LocalPlayer;
-                foreach (var obj in objectTable)
-                {
-                    if (obj != local && obj.Position != Vector3.Zero)
-                        positions.Add(obj.Position);
-                }
-                return positions;
+                config.ScreenPosition = pos.Length == 3 ? pos : null;
+                SaveConfig();
             });
 
         framework.Update += OnFrameworkUpdate;
+    }
+
+    private Vector3? GetPlayerPos() => objectTable.LocalPlayer?.Position;
+    private float GetPlayerRot() => objectTable.LocalPlayer?.Rotation ?? 0f;
+
+    private System.Collections.Generic.List<Vector3> GetNearbyPlayerPositions()
+    {
+        var positions = new System.Collections.Generic.List<Vector3>();
+        var local = objectTable.LocalPlayer;
+        foreach (var obj in objectTable)
+        {
+            if (obj != local && obj.Position != Vector3.Zero)
+                positions.Add(obj.Position);
+        }
+        return positions;
     }
 
     [DllImport("user32.dll")]
@@ -535,14 +561,14 @@ public sealed class EmulatorService : IDisposable
                 ImGui.EndTabItem();
             }
 
-            if (ImGui.BeginTabItem("Keyboard"))
+            if (ImGui.BeginTabItem("Controls"))
             {
+                ImGui.TextUnformatted("Keyboard");
                 DrawKeyboardTab();
-                ImGui.EndTabItem();
-            }
-
-            if (ImGui.BeginTabItem("Controller"))
-            {
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
+                ImGui.TextUnformatted("Controller");
                 DrawControllerTab();
                 ImGui.EndTabItem();
             }
@@ -553,7 +579,7 @@ public sealed class EmulatorService : IDisposable
                 ImGui.EndTabItem();
             }
 
-            if (ImGui.BeginTabItem("Online"))
+            if (ImGui.BeginTabItem("Sync"))
             {
                 DrawIdentitySection();
                 ImGui.Spacing();
@@ -567,11 +593,13 @@ public sealed class EmulatorService : IDisposable
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Spacing();
-                netplayPanel?.DrawTab();
-                ImGui.Spacing();
-                ImGui.Separator();
-                ImGui.Spacing();
                 DrawWorldScreenSection();
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("Netplay"))
+            {
+                netplayPanel?.DrawTab();
                 ImGui.EndTabItem();
             }
 
@@ -1314,6 +1342,22 @@ public sealed class EmulatorService : IDisposable
             ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), $"{config.PlayerCharacterName} ({config.PlayerWorld})");
             ImGui.TextDisabled($"Lodestone ID: {config.PlayerLodestoneId}");
 
+            var playerId = xivAuth.GetPlayerId();
+            if (!string.IsNullOrEmpty(playerId))
+            {
+                ImGui.TextUnformatted("Player ID:");
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), playerId);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Copy"))
+                    ImGui.SetClipboardText(playerId);
+                ImGui.TextWrapped("Share this ID with friends so they can watch your stream.");
+            }
+            else
+            {
+                ImGui.TextWrapped("No Lodestone ID on this character — streaming needs one.");
+            }
+
             if (ImGui.Button("Log out"))
             {
                 xivAuth.Logout();
@@ -1325,8 +1369,11 @@ public sealed class EmulatorService : IDisposable
             ImGui.TextWrapped(xivAuth.Status);
             ImGui.Spacing();
             ImGui.TextUnformatted($"Code: {xivAuth.UserCode}");
-            ImGui.TextWrapped($"Open: {xivAuth.VerificationUrl}");
 
+            if (ImGui.SmallButton("Reopen login page"))
+                Dalamud.Utility.Util.OpenLink(xivAuth.LoginUrl);
+
+            ImGui.SameLine();
             if (ImGui.Button("Cancel"))
             {
                 xivAuth.Logout();
@@ -1348,7 +1395,7 @@ public sealed class EmulatorService : IDisposable
         }
     }
 
-    private string syncKeyInput = string.Empty;
+    private string syncIdInput = string.Empty;
     private string syncNameInput = string.Empty;
 
     private void DrawSyncSection()
@@ -1360,6 +1407,8 @@ public sealed class EmulatorService : IDisposable
             ImGui.TextWrapped("Log in with XIVAuth above to go live and sync with friends.");
             return;
         }
+
+        var playerId = xivAuth.GetPlayerId();
 
         // Go live / stop live.
         if (streamPanel is { IsLive: true })
@@ -1374,6 +1423,10 @@ public sealed class EmulatorService : IDisposable
                 streamPanel.StopLive();
             }
         }
+        else if (string.IsNullOrEmpty(playerId))
+        {
+            ImGui.TextWrapped("This character has no Lodestone ID, so it can't go live.");
+        }
         else
         {
             var backend = core;
@@ -1381,90 +1434,247 @@ public sealed class EmulatorService : IDisposable
             {
                 if (ImGui.Button("Go live", new Vector2(-1, 0)))
                 {
-                    streamPanel?.GoLive(xivAuth.GetPlayerUid(), config.PlayerCharacterName);
+                    streamPanel?.GoLive(
+                        xivAuth.GetPlayerUid(), config.PlayerCharacterName, playerId);
                 }
             }
             else
             {
-                ImGui.TextWrapped("Load a game to go live. Friends with your key can watch your world screen.");
+                ImGui.TextWrapped("Load a game to go live. Friends with your player ID can watch.");
             }
+        }
+
+        if (!string.IsNullOrEmpty(streamPanel?.GetStreamHost()?.VideoStatus) &&
+            streamPanel.GetStreamHost()!.VideoStatus != "Not started")
+        {
+            ImGui.TextDisabled(streamPanel.GetStreamHost()!.VideoStatus);
         }
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
+        PollSyncStatus();
+
         // Friend list.
-        ImGui.TextUnformatted("Synced friends");
+        ImGui.TextUnformatted($"Synced friends  ({streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} screens)");
 
         if (config.SyncFriends.Count == 0)
         {
-            ImGui.TextWrapped("No friends synced yet. Add a friend's XIVAuth key to watch their stream.");
+            ImGui.TextWrapped("No friends synced yet. Add a friend's player ID to watch their stream.");
         }
 
         int? removeIndex = null;
         string? watchKey = null;
+        string? stopKey = null;
+        string? placeKey = null;
 
         for (var i = 0; i < config.SyncFriends.Count; i++)
         {
             var friend = config.SyncFriends[i];
-            var label = string.IsNullOrEmpty(friend.Name) ? friend.Key[..Math.Min(12, friend.Key.Length)] + "..." : friend.Name;
+            var key = StreamPanel.NormalizeId(friend.Key);
+
+            LivePlayerInfo? live;
+            lock (liveStatus)
+                liveStatus.TryGetValue(key, out live);
+
+            var label = !string.IsNullOrEmpty(friend.Name) ? friend.Name
+                : !string.IsNullOrEmpty(live?.Name) ? live!.Name
+                : key;
 
             ImGui.TextUnformatted(label);
             ImGui.SameLine();
 
-            if (streamPanel is { IsSubscribed: true } && streamPanel.GetStreamClient()?.SubscribedUid == friend.Key)
+            if (live != null)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), "LIVE");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"({live.Viewers} watching)");
+                ImGui.SameLine();
+            }
+
+            var watching = streamPanel?.IsWatching(key) == true;
+            if (watching)
             {
                 if (ImGui.SmallButton($"Stop##friend{i}"))
-                {
-                    streamPanel.Unsubscribe();
-                }
+                    stopKey = key;
+
+                ImGui.SameLine();
+                var windowVisible = streamPanel?.IsWindowVisible(key) == true;
+                if (ImGui.SmallButton($"{(windowVisible ? "Hide" : "Window")}##friend{i}"))
+                    streamPanel?.SetWindowVisible(key, !windowVisible);
+
+                ImGui.SameLine();
+                if (ImGui.SmallButton($"Screen##friend{i}"))
+                    placeKey = key;
             }
             else
             {
+                ImGui.BeginDisabled(live == null);
                 if (ImGui.SmallButton($"Watch##friend{i}"))
-                {
-                    watchKey = friend.Key;
-                }
+                    watchKey = key;
+                ImGui.EndDisabled();
             }
 
             ImGui.SameLine();
             if (ImGui.SmallButton($"X##friend{i}"))
-            {
                 removeIndex = i;
-            }
         }
+
+        if (!string.IsNullOrEmpty(watchError))
+            ImGui.TextColored(new Vector4(1f, 0.6f, 0.2f, 1f), watchError);
 
         if (removeIndex.HasValue)
         {
+            var removedKey = StreamPanel.NormalizeId(config.SyncFriends[removeIndex.Value].Key);
             config.SyncFriends.RemoveAt(removeIndex.Value);
+            streamPanel?.StopWatching(removedKey);
             SaveConfig();
         }
 
-        if (watchKey != null)
+        if (watchKey != null && streamPanel != null)
         {
-            streamPanel?.SubscribeToPlayer(watchKey);
+            watchError = streamPanel.TryWatch(watchKey, out var err) ? null : err;
+        }
+
+        if (stopKey != null)
+        {
+            streamPanel?.StopWatching(stopKey);
+            watchError = null;
+        }
+
+        if (placeKey != null)
+        {
+            var renderer = GetOrCreateWatchScreen(placeKey);
+            BeginPlacement(renderer);
         }
 
         ImGui.Spacing();
 
-        // Add friend.
+        // Add friend by player ID.
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##synckey", "XIVAuth key", ref syncKeyInput, 256);
+        if (ImGui.InputTextWithHint("##syncid", "Player ID (e.g. 1234-5678)", ref syncIdInput, 16))
+            watchError = null;
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##syncname", "Name (optional)", ref syncNameInput, 128);
 
-        if (ImGui.Button("Add friend") && !string.IsNullOrWhiteSpace(syncKeyInput))
+        if (ImGui.Button("Add friend") && !string.IsNullOrWhiteSpace(syncIdInput))
         {
-            config.SyncFriends.Add(new SyncFriend
+            var normalized = StreamPanel.NormalizeId(syncIdInput);
+            var digits = normalized.Replace("-", "");
+            if (digits.Length is < 6 or > 8)
             {
-                Key = syncKeyInput.Trim(),
-                Name = syncNameInput.Trim(),
-            });
-            syncKeyInput = string.Empty;
-            syncNameInput = string.Empty;
-            SaveConfig();
+                watchError = "Player IDs are 6-8 digits, e.g. 1234-5678.";
+            }
+            else if (config.SyncFriends.Any(f => StreamPanel.NormalizeId(f.Key) == normalized))
+            {
+                watchError = "That player is already synced.";
+            }
+            else
+            {
+                config.SyncFriends.Add(new SyncFriend
+                {
+                    Key = normalized,
+                    Name = syncNameInput.Trim(),
+                });
+                syncIdInput = string.Empty;
+                syncNameInput = string.Empty;
+                watchError = null;
+                lastSyncCheck = DateTime.MinValue; // poll right away
+                SaveConfig();
+            }
         }
+    }
+
+    // Poll the relay for which synced friends are live (every few seconds).
+    private void PollSyncStatus()
+    {
+        if (streamPanel == null || config.SyncFriends.Count == 0)
+            return;
+        if (syncCheckInFlight)
+            return;
+        if ((DateTime.UtcNow - lastSyncCheck).TotalSeconds < 5)
+            return;
+
+        lastSyncCheck = DateTime.UtcNow;
+        syncCheckInFlight = true;
+
+        var keys = config.SyncFriends
+            .Select(f => StreamPanel.NormalizeId(f.Key))
+            .Where(k => k.Length >= 6)
+            .Distinct()
+            .ToList();
+        var relayUrl = streamPanel.RelayUrl;
+
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                using var ws = new System.Net.WebSockets.ClientWebSocket();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await ws.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), cts.Token);
+
+                var json = new ControlMsg { Action = "sync_check", Keys = keys }.ToJson();
+                await ws.SendAsync(
+                    new ArraySegment<byte>(System.Text.Encoding.UTF8.GetBytes(json)),
+                    System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+                var buffer = new byte[16384];
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Text)
+                {
+                    var msg = ControlMsg.Parse(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count));
+                    if (msg?.Type == "sync_status" && msg.Live != null)
+                    {
+                        lock (liveStatus)
+                        {
+                            liveStatus.Clear();
+                            foreach (var info in msg.Live)
+                                liveStatus[StreamPanel.NormalizeId(info.PlayerId)] = info;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                log.Verbose($"[Sync] presence check failed: {ex.Message}");
+            }
+            finally
+            {
+                syncCheckInFlight = false;
+            }
+        });
+    }
+
+    private WorldScreenRenderer GetOrCreateWatchScreen(string playerId)
+    {
+        if (watchScreens.TryGetValue(playerId, out var existing))
+            return existing;
+
+        config.WatchScreenPositions.TryGetValue(playerId, out var saved);
+        var renderer = new WorldScreenRenderer(
+            gameGui, textureProvider, streamConfig,
+            GetPlayerPos, GetPlayerRot, GetNearbyPlayerPositions,
+            saved,
+            pos =>
+            {
+                if (pos.Length == 3)
+                    config.WatchScreenPositions[playerId] = pos;
+                else
+                    config.WatchScreenPositions.Remove(playerId);
+                SaveConfig();
+            });
+        watchScreens[playerId] = renderer;
+        return renderer;
+    }
+
+    // Only one screen can be in placement mode at a time.
+    private void BeginPlacement(WorldScreenRenderer target)
+    {
+        worldScreen!.PlacementMode = false;
+        foreach (var r in watchScreens.Values)
+            r.PlacementMode = false;
+        target.PlacementMode = true;
     }
 
     private void DrawWorldScreenSection()
@@ -1478,6 +1688,7 @@ public sealed class EmulatorService : IDisposable
         if (ImGui.SliderFloat("##screenwidth", ref width, 0.5f, 5f, "%.1f yalms wide"))
         {
             config.ScreenWidth = width;
+            streamConfig.ScreenWidth = width;
             SaveConfig();
         }
 
@@ -1486,6 +1697,7 @@ public sealed class EmulatorService : IDisposable
         if (ImGui.SliderFloat("##screenheight", ref height, 0f, 4f, "%.1f yalms high"))
         {
             config.ScreenHeight = height;
+            streamConfig.ScreenHeight = height;
             SaveConfig();
         }
 
@@ -1494,6 +1706,7 @@ public sealed class EmulatorService : IDisposable
         if (ImGui.SliderFloat("##screenopacity", ref opacity, 0.1f, 1f, "%.0f%% opacity"))
         {
             config.ScreenOpacity = opacity;
+            streamConfig.ScreenOpacity = opacity;
             SaveConfig();
         }
 
@@ -1505,48 +1718,35 @@ public sealed class EmulatorService : IDisposable
         }
         else
         {
-            if (ImGui.Button("Place screen in world", new Vector2(-1, 0)))
-                worldScreen.PlacementMode = true;
+            if (ImGui.Button("Place local screen in world", new Vector2(-1, 0)))
+                BeginPlacement(worldScreen);
 
             if (worldScreen.IsPlaced)
             {
                 ImGui.SameLine();
                 if (ImGui.Button("Reset position"))
-                {
-                    config.ScreenPosition = null;
-                    SaveConfig();
-                }
+                    worldScreen.ClearPlacement();
             }
 
             if (!string.IsNullOrEmpty(worldScreen.OcclusionDebug))
                 ImGui.TextWrapped($"Occlusion: {worldScreen.OcclusionDebug}");
         }
+
+        if (watchScreens.Count > 0)
+            ImGui.TextWrapped(
+                "Watched streams get their own screens — use the Screen button in the friend list to place them.");
     }
 
-    // Draw the spectator viewer window (called from Plugin.Draw alongside the main window).
-    public void DrawViewerWindow() => streamPanel?.DrawViewerWindow();
+    // Draw the viewer windows for watched streams (called from Plugin.Draw).
+    public void DrawViewerWindow() => streamPanel?.DrawViewerWindows();
 
-    // Draw the world-placed screen (called from Plugin.Draw every frame).
+    // Draw the world-placed screens (called from Plugin.Draw every frame).
     public void DrawWorldScreen()
     {
         if (worldScreen == null) return;
 
-        // Spectator frames take priority; fall back to local core frames.
-        var client = streamPanel?.GetStreamClient();
-        var gotFrame = false;
-        if (client != null)
-        {
-            var version = worldScreenVersion;
-            if (client.TryGetFrame(ref version, out var rgba, out var w, out var h))
-            {
-                worldScreenVersion = version;
-                worldScreen.SetFrame(rgba, w, h);
-                gotFrame = true;
-            }
-        }
-
-        // Host / local play: feed the core's own framebuffer.
-        if (!gotFrame && core is { IsGameLoaded: true })
+        // Local screen: feed the core's own framebuffer.
+        if (core is { IsGameLoaded: true })
         {
             var localVer = core.FrameVersion;
             if (localVer != localScreenVersion && core.TryGetFrame(out var localRgba, out var lw, out var lh))
@@ -1557,9 +1757,38 @@ public sealed class EmulatorService : IDisposable
         }
 
         worldScreen.Draw();
+
+        if (streamPanel == null) return;
+
+        // One world screen per watched stream; feed each from its client.
+        var active = new System.Collections.Generic.HashSet<string>();
+        foreach (var client in streamPanel.Clients)
+        {
+            if (client.SubscribedPlayerId == null)
+                continue;
+
+            var key = StreamPanel.NormalizeId(client.SubscribedPlayerId);
+            active.Add(key);
+
+            var renderer = GetOrCreateWatchScreen(key);
+            var version = watchVersions.TryGetValue(key, out var v) ? v : -1L;
+            if (client.TryGetFrame(ref version, out var rgba, out var w, out var h))
+            {
+                watchVersions[key] = version;
+                renderer.SetFrame(rgba, w, h);
+            }
+            renderer.Draw();
+        }
+
+        // Drop screens for streams we no longer watch (positions stay saved).
+        foreach (var key in watchScreens.Keys.Where(k => !active.Contains(k)).ToList())
+        {
+            watchScreens[key].Dispose();
+            watchScreens.Remove(key);
+            watchVersions.Remove(key);
+        }
     }
 
-    private long worldScreenVersion;
     private long localScreenVersion = -1;
 
     internal WorldScreenRenderer? WorldScreen => worldScreen;
@@ -1575,6 +1804,9 @@ public sealed class EmulatorService : IDisposable
         netplayPanel = null;
         worldScreen?.Dispose();
         worldScreen = null;
+        foreach (var renderer in watchScreens.Values)
+            renderer.Dispose();
+        watchScreens.Clear();
         StopAudio();
         texture?.Dispose();
         texture = null;

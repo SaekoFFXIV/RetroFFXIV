@@ -3,16 +3,21 @@ using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 
 namespace EmulatorStream;
 
-// ImGui UI for hosting and spectating streams.  Draws the "Stream" tab
-// contents inside the emulator's control deck, and a separate spectator
-// viewer window when watching someone else's stream.
+// ImGui UI for hosting and watching streams.  Hosting is identity-based
+// (go live under a player ID — no room codes).  Watching supports up to
+// MaxStreams concurrent subscriptions; each gets its own viewer window and
+// can also be rendered on a world screen by the hosting plugin.
 public sealed class StreamPanel : IDisposable
 {
+    public const int MaxStreams = 4;
+
     private readonly StreamConfig config;
     private readonly ITextureProvider textureProvider;
     private readonly Action<string> log;
@@ -20,29 +25,26 @@ public sealed class StreamPanel : IDisposable
     private readonly Action saveConfig;
 
     private StreamHost? host;
-    private StreamClient? client;
-
-    private string joinCode = string.Empty;
     private string relayUrl = string.Empty;
-    private bool useWorldScreen;
 
-    // Spectator viewer texture.
-    private IDalamudTextureWrap? viewerTexture;
-    private long lastViewerVersion = -1;
-    private bool showViewerWindow;
-
-    public bool IsHosting => host?.IsHosting == true;
-    public bool IsLive => host?.IsLive == true;
-    public bool IsSpectating => client?.IsConnected == true;
-    public bool IsSubscribed => client?.SubscribedUid != null;
-    public bool UseWorldScreen => useWorldScreen;
-    public StreamClient? GetStreamClient() => client;
-    public StreamHost? GetStreamHost() => host;
-    public bool ShowViewerWindow
+    // One entry per watched stream, keyed by player ID.
+    private sealed class Viewer
     {
-        get => showViewerWindow;
-        set => showViewerWindow = value;
+        public required StreamClient Client;
+        public IDalamudTextureWrap? Texture;
+        public long TextureVersion = -1;
+        public bool ShowWindow = true;
+        public bool Disposed;
     }
+
+    private readonly Dictionary<string, Viewer> viewers = new();
+    private readonly List<string> removeQueue = new();
+
+    public bool IsLive => host?.IsLive == true;
+    public int WatchCount => viewers.Count;
+    public string RelayUrl => relayUrl;
+    public StreamHost? GetStreamHost() => host;
+    public IReadOnlyCollection<StreamClient> Clients => viewers.Values.Select(v => v.Client).ToList();
 
     public StreamPanel(
         StreamConfig config,
@@ -59,96 +61,10 @@ public sealed class StreamPanel : IDisposable
         relayUrl = config.RelayUrl;
     }
 
-    // Draw the "Stream" tab contents inside the control deck.
+    // Draw the shared streaming settings (relay URL) inside the Sync tab.
     public void DrawTab()
     {
-        DrawHostSection();
-        ImGui.Separator();
-        DrawSpectateSection();
-        ImGui.Separator();
         DrawRelaySetting();
-    }
-
-    private void DrawHostSection()
-    {
-        ImGui.TextUnformatted("Host a stream");
-
-        var backend = getBackend();
-        if (backend is not { IsGameLoaded: true })
-        {
-            ImGui.TextWrapped("Load a game first, then start hosting.");
-            return;
-        }
-
-        if (host is { IsHosting: true })
-        {
-            ImGui.TextWrapped($"Room code: {host.RoomCode}");
-            ImGui.TextWrapped($"Viewers: {host.ViewerCount}");
-            ImGui.TextWrapped(host.Status);
-            ImGui.TextWrapped($"Video: {host.VideoStatus}");
-
-            if (ImGui.Button("Stop hosting", new Vector2(-1, 0)))
-            {
-                _ = Task.Run(() => host.StopAsync());
-            }
-        }
-        else
-        {
-            if (!string.IsNullOrEmpty(host?.Status) && host.Status != "Idle")
-                ImGui.TextWrapped(host.Status);
-
-            if (ImGui.Button("Start hosting", new Vector2(-1, 0)))
-            {
-                host?.Dispose();
-                host = new StreamHost(backend, relayUrl, log);
-                host.StateChanged += () => { };
-                _ = Task.Run(() => host.StartAsync());
-            }
-        }
-    }
-
-    private void DrawSpectateSection()
-    {
-        ImGui.TextUnformatted("Watch a stream");
-
-        // Viewer mode toggle.
-        var modes = new[] { "Window", "World screen" };
-        var mode = useWorldScreen ? 1 : 0;
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.Combo("##viewermode", ref mode, modes, modes.Length))
-            useWorldScreen = mode == 1;
-
-        if (client is { IsConnected: true })
-        {
-            ImGui.TextWrapped(client.Status);
-
-            if (ImGui.Button("Stop watching", new Vector2(-1, 0)))
-            {
-                showViewerWindow = false;
-                _ = Task.Run(() => client.DisconnectAsync());
-            }
-        }
-        else
-        {
-            if (!string.IsNullOrEmpty(client?.Status) && client.Status != "Idle")
-                ImGui.TextWrapped(client.Status);
-
-            ImGui.SetNextItemWidth(-80);
-            ImGui.InputTextWithHint("##roomcode", "Room code", ref joinCode, 8);
-            ImGui.SameLine();
-
-            if (ImGui.Button("Join") && !string.IsNullOrWhiteSpace(joinCode))
-            {
-                client?.Dispose();
-                client = new StreamClient(relayUrl, log);
-                client.StateChanged += () =>
-                {
-                    if (client.IsConnected && !useWorldScreen)
-                        showViewerWindow = true;
-                };
-                _ = Task.Run(() => client.ConnectAsync(joinCode));
-            }
-        }
     }
 
     private void DrawRelaySetting()
@@ -166,70 +82,9 @@ public sealed class StreamPanel : IDisposable
             "Use wss:// for a Cloudflare Tunnel, ws:// for local/Tailscale.");
     }
 
-    // Draw the spectator viewer window (separate ImGui window).
-    public void DrawViewerWindow()
-    {
-        if (!showViewerWindow || client is not { IsConnected: true })
-            return;
+    // --- Hosting (identity-based) ---
 
-        UpdateViewerTexture();
-
-        ImGui.SetNextWindowSize(new Vector2(540, 500), ImGuiCond.FirstUseEver);
-        if (ImGui.Begin("Stream Viewer", ref showViewerWindow))
-        {
-            if (viewerTexture != null)
-            {
-                var avail = ImGui.GetContentRegionAvail();
-                var texW = (float)viewerTexture.Width;
-                var texH = (float)viewerTexture.Height;
-                var aspect = texW / texH;
-
-                var drawW = avail.X;
-                var drawH = drawW / aspect;
-                if (drawH > avail.Y)
-                {
-                    drawH = avail.Y;
-                    drawW = drawH * aspect;
-                }
-
-                ImGui.Image(viewerTexture.Handle, new Vector2(drawW, drawH));
-            }
-            else
-            {
-                ImGui.TextWrapped("Waiting for frames...");
-            }
-        }
-
-        ImGui.End();
-    }
-
-    private void UpdateViewerTexture()
-    {
-        if (client == null)
-            return;
-
-        var version = lastViewerVersion;
-        if (!client.TryGetFrame(ref version, out var rgba, out var w, out var h))
-            return;
-
-        lastViewerVersion = version;
-
-        try
-        {
-            var spec = RawImageSpecification.Rgba32(w, h);
-            var newTex = textureProvider.CreateFromRaw(spec, rgba, "SnesEmulator.StreamViewer");
-            viewerTexture?.Dispose();
-            viewerTexture = newTex;
-        }
-        catch (Exception ex)
-        {
-            log($"Viewer texture error: {ex.Message}");
-        }
-    }
-
-    // --- Identity-based streaming (sync) ---
-
-    public void GoLive(string uid, string name)
+    public void GoLive(string uid, string name, string playerId)
     {
         var backend = getBackend();
         if (backend is not { IsGameLoaded: true })
@@ -238,7 +93,7 @@ public sealed class StreamPanel : IDisposable
         host?.Dispose();
         host = new StreamHost(backend, relayUrl, log);
         host.StateChanged += () => { };
-        _ = Task.Run(() => host.GoLiveAsync(uid, name));
+        _ = Task.Run(() => host.GoLiveAsync(uid, name, playerId));
     }
 
     public void StopLive()
@@ -247,32 +102,202 @@ public sealed class StreamPanel : IDisposable
             _ = Task.Run(() => host.StopLiveAsync());
     }
 
-    public void SubscribeToPlayer(string uid)
+    // --- Watching (up to MaxStreams concurrent) ---
+
+    public bool IsWatching(string playerId) => viewers.ContainsKey(NormalizeId(playerId));
+
+    public StreamClient? GetClient(string playerId) =>
+        viewers.TryGetValue(NormalizeId(playerId), out var v) ? v.Client : null;
+
+    // Start watching a player.  Returns false with an error when the
+    // 4-screen cap is reached (or the ID is already being watched).
+    public bool TryWatch(string playerId, out string? error)
     {
-        client?.Dispose();
-        client = new StreamClient(relayUrl, log);
+        error = null;
+        var key = NormalizeId(playerId);
+
+        if (viewers.ContainsKey(key))
+            return true;
+
+        if (viewers.Count >= MaxStreams)
+        {
+            error = $"Limit reached — you can watch up to {MaxStreams} screens at a time.";
+            return false;
+        }
+
+        // Audio follows the newest stream; mute the others.
+        foreach (var v in viewers.Values)
+            v.Client.SetAudioEnabled(false);
+
+        var client = new StreamClient(relayUrl, log);
+        var viewer = new Viewer { Client = client };
+        viewers[key] = viewer;
+
         client.StateChanged += () =>
         {
-            if (client.IsConnected && !useWorldScreen)
-                showViewerWindow = true;
+            if (!client.IsConnected && !string.IsNullOrEmpty(client.Status)
+                && client.Status is not "Idle" and not "Connecting..." and not "Disconnecting...")
+            {
+                // Connection ended (live_ended, error, disconnect): drop the entry.
+                lock (removeQueue)
+                {
+                    if (!removeQueue.Contains(key))
+                        removeQueue.Add(key);
+                }
+            }
         };
-        _ = Task.Run(() => client.SubscribeAsync(uid));
+
+        _ = Task.Run(() => client.SubscribeAsync(playerId));
+        return true;
     }
 
-    public void Unsubscribe()
+    public void StopWatching(string playerId)
     {
-        showViewerWindow = false;
-        if (client != null)
-            _ = Task.Run(() => client.UnsubscribeAsync());
+        var key = NormalizeId(playerId);
+        if (!viewers.TryGetValue(key, out var viewer))
+            return;
+
+        viewer.ShowWindow = false;
+        _ = Task.Run(async () =>
+        {
+            if (viewer.Client.IsConnected)
+                await viewer.Client.UnsubscribeAsync();
+            lock (removeQueue)
+            {
+                if (!removeQueue.Contains(key))
+                    removeQueue.Add(key);
+            }
+        });
+    }
+
+    public void SetWindowVisible(string playerId, bool visible)
+    {
+        if (viewers.TryGetValue(NormalizeId(playerId), out var viewer))
+            viewer.ShowWindow = visible;
+    }
+
+    public bool IsWindowVisible(string playerId) =>
+        viewers.TryGetValue(NormalizeId(playerId), out var viewer) && viewer.ShowWindow;
+
+    // Drop watchers whose connection ended since the last pass.
+    private void FlushRemoveQueue()
+    {
+        List<string> pending;
+        lock (removeQueue)
+        {
+            if (removeQueue.Count == 0)
+                return;
+            pending = new List<string>(removeQueue);
+            removeQueue.Clear();
+        }
+
+        foreach (var key in pending)
+        {
+            if (!viewers.Remove(key, out var viewer))
+                continue;
+            viewer.Disposed = true;
+            viewer.Client.Dispose();
+            viewer.Texture?.Dispose();
+            viewer.Texture = null;
+            log($"Stopped watching {key}");
+        }
+    }
+
+    // Draw one viewer window per watched stream.
+    public void DrawViewerWindows()
+    {
+        FlushRemoveQueue();
+
+        foreach (var (key, viewer) in viewers)
+        {
+            if (!viewer.ShowWindow)
+            {
+                // Still refresh the texture so world screens keep updating
+                // even while the window is hidden.
+                UpdateViewerTexture(viewer);
+                continue;
+            }
+
+            UpdateViewerTexture(viewer);
+
+            var name = viewer.Client.SubscribedName ?? key;
+            var open = viewer.ShowWindow;
+
+            ImGui.SetNextWindowSize(new Vector2(540, 500), ImGuiCond.FirstUseEver);
+            if (ImGui.Begin($"Stream Viewer — {name}##viewer_{key}", ref open))
+            {
+                if (viewer.Texture != null)
+                {
+                    var avail = ImGui.GetContentRegionAvail();
+                    var texW = (float)viewer.Texture.Width;
+                    var texH = (float)viewer.Texture.Height;
+                    var aspect = texW / texH;
+
+                    var drawW = avail.X;
+                    var drawH = drawW / aspect;
+                    if (drawH > avail.Y)
+                    {
+                        drawH = avail.Y;
+                        drawW = drawH * aspect;
+                    }
+
+                    ImGui.Image(viewer.Texture.Handle, new Vector2(drawW, drawH));
+                }
+                else
+                {
+                    ImGui.TextWrapped("Waiting for frames...");
+                }
+            }
+
+            ImGui.End();
+
+            // Closing the window hides it; the subscription stays alive so
+            // the stream can keep playing on a world screen.
+            if (!open)
+                viewer.ShowWindow = false;
+        }
+    }
+
+    private void UpdateViewerTexture(Viewer viewer)
+    {
+        var version = viewer.TextureVersion;
+        if (!viewer.Client.TryGetFrame(ref version, out var rgba, out var w, out var h))
+            return;
+
+        viewer.TextureVersion = version;
+
+        try
+        {
+            var spec = RawImageSpecification.Rgba32(w, h);
+            var newTex = textureProvider.CreateFromRaw(spec, rgba, $"SnesEmulator.StreamViewer.{w}x{h}");
+            viewer.Texture?.Dispose();
+            viewer.Texture = newTex;
+        }
+        catch (Exception ex)
+        {
+            log($"Viewer texture error: {ex.Message}");
+        }
+    }
+
+    // Digits with a dash in the middle; compare on digits only.
+    public static string NormalizeId(string value)
+    {
+        var digits = new string(value.Where(char.IsDigit).ToArray());
+        if (digits.Length <= 3)
+            return digits;
+        var split = digits.Length / 2;
+        return $"{digits[..split]}-{digits[split..]}";
     }
 
     public void Dispose()
     {
         host?.Dispose();
         host = null;
-        client?.Dispose();
-        client = null;
-        viewerTexture?.Dispose();
-        viewerTexture = null;
+        foreach (var viewer in viewers.Values)
+        {
+            viewer.Client.Dispose();
+            viewer.Texture?.Dispose();
+        }
+        viewers.Clear();
     }
 }

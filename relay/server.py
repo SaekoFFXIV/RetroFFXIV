@@ -1,11 +1,12 @@
 """
 Retro FFXIV streaming relay.
 
-A WebSocket fan-out hub with three modes:
-  1. Room-based spectating (legacy): host creates a room code, spectators join.
-  2. Identity-based streaming: host goes live with their XIVAuth persistent_key,
-     friends subscribe by key — no room code needed.
-  3. Netplay: lockstep input routing between two players in a room.
+A WebSocket hub with two modes:
+  1. Identity-based streaming: a host goes live under their player ID
+     (a short numeric code like "1234-5678", derived from their FFXIV
+     Lodestone ID via XIVAuth). Friends who know the ID subscribe — no
+     room codes.
+  2. Netplay: lockstep input routing between two players in a room.
 
 The relay never decodes or re-encodes — it is a dumb pipe with routing.
 
@@ -51,11 +52,9 @@ def generate_code() -> str:
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
 
 
-@dataclass
-class Room:
-    code: str
-    host: WebSocket
-    spectators: set[WebSocket] = field(default_factory=set)
+def normalize_player_id(value: str) -> str:
+    """Player IDs are digits with a dash in the middle; compare on digits only."""
+    return "".join(ch for ch in value if ch.isdigit())
 
 
 @dataclass
@@ -74,19 +73,31 @@ class NetplayRoom:
 
 @dataclass
 class LiveChannel:
-    uid: str                # XIVAuth persistent_key (or legacy UUID)
+    uid: str                # XIVAuth persistent_key
+    player_id: str          # normalized player ID (digits only)
+    display_id: str         # dash-formatted ID for display
     name: str               # character name for display
     host: WebSocket
     subscribers: set[WebSocket] = field(default_factory=set)
 
 
-rooms: dict[str, Room] = {}
 netplay_rooms: dict[str, NetplayRoom] = {}
-live_channels: dict[str, LiveChannel] = {}   # uid → channel
-live_subscriptions: dict[WebSocket, str] = {} # subscriber ws → uid they watch
-# Reverse lookups.
-connections: dict[WebSocket, Room] = {}
+live_channels: dict[str, LiveChannel] = {}       # uid → channel
+channels_by_player_id: dict[str, LiveChannel] = {}  # normalized ID → channel
+live_subscriptions: dict[WebSocket, str] = {}    # subscriber ws → uid they watch
 netplay_connections: dict[WebSocket, NetplayRoom] = {}
+
+
+async def _teardown_channel(uid: str, notify: bool = True) -> None:
+    channel = live_channels.pop(uid, None)
+    if channel is None:
+        return
+    if channels_by_player_id.get(channel.player_id) is channel:
+        channels_by_player_id.pop(channel.player_id, None)
+    for sub in list(channel.subscribers):
+        if notify:
+            asyncio.create_task(_safe_send_text(sub, {"type": "live_ended", "uid": uid}))
+        live_subscriptions.pop(sub, None)
 
 
 def remove_connection(ws: WebSocket) -> None:
@@ -96,33 +107,16 @@ def remove_connection(ws: WebSocket) -> None:
         channel = live_channels.get(sub_uid)
         if channel is not None:
             channel.subscribers.discard(ws)
-            log.info("live %s subscriber left (%d remaining)", sub_uid[:8], len(channel.subscribers))
+            log.info("live %s subscriber left (%d remaining)",
+                     channel.display_id, len(channel.subscribers))
         return
 
     # Check live channel hosts.
     live_uid = next((u for u, ch in live_channels.items() if ch.host is ws), None)
     if live_uid is not None:
-        channel = live_channels.pop(live_uid)
-        for sub in list(channel.subscribers):
-            asyncio.create_task(_safe_send_text(sub, {"type": "live_ended", "uid": live_uid}))
-            live_subscriptions.pop(sub, None)
-        log.info("live %s ended (host left)", live_uid[:8])
-        return
-
-    # Check spectate rooms.
-    room = connections.pop(ws, None)
-    if room is not None:
-        if ws is room.host:
-            for spec in list(room.spectators):
-                asyncio.create_task(_safe_send_text(spec, {"type": "closed"}))
-                connections.pop(spec, None)
-                asyncio.create_task(spec.close())
-            rooms.pop(room.code, None)
-            log.info("room %s closed (host left)", room.code)
-        else:
-            room.spectators.discard(ws)
-            log.info("room %s spectator left (%d remaining)", room.code, len(room.spectators))
-            asyncio.create_task(_notify_viewers(room))
+        channel = live_channels[live_uid]
+        log.info("live %s ended (host left)", channel.display_id)
+        asyncio.create_task(_teardown_channel(live_uid))
         return
 
     # Check netplay rooms.
@@ -158,13 +152,9 @@ async def _safe_send_bytes(ws: WebSocket, data: bytes) -> None:
         pass
 
 
-async def _notify_viewers(room: Room) -> None:
-    await _safe_send_text(room.host, {"type": "viewers", "count": len(room.spectators)})
-
-
 @app.get("/health")
 async def health():
-    return {"rooms": len(rooms), "netplay_rooms": len(netplay_rooms), "live_channels": len(live_channels)}
+    return {"netplay_rooms": len(netplay_rooms), "live_channels": len(live_channels)}
 
 
 @app.websocket("/ws")
@@ -202,13 +192,7 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
 
     action = msg.get("action")
 
-    if action == "create":
-        await _handle_create(ws)
-    elif action == "join":
-        await _handle_join(ws, msg.get("room", ""))
-    elif action == "close":
-        await _handle_close(ws)
-    elif action == "create_netplay":
+    if action == "create_netplay":
         uid = msg.get("uid", "")
         if not uid:
             await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
@@ -222,89 +206,38 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
         await _handle_join_netplay(ws, msg.get("room", ""), uid)
     elif action == "go_live":
         uid = msg.get("uid", "")
+        player_id = normalize_player_id(msg.get("player_id", ""))
         if not uid:
             await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
             return
-        await _handle_go_live(ws, uid, msg.get("name", ""))
+        if not player_id:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing player_id"})
+            return
+        await _handle_go_live(ws, uid, player_id, msg.get("player_id", ""), msg.get("name", ""))
     elif action == "stop_live":
         await _handle_stop_live(ws)
     elif action == "subscribe":
-        uid = msg.get("uid", "")
-        if not uid:
-            await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
+        player_id = normalize_player_id(msg.get("player_id", ""))
+        if not player_id:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing player_id"})
             return
-        await _handle_subscribe(ws, uid)
+        await _handle_subscribe(ws, player_id)
     elif action == "unsubscribe":
         await _handle_unsubscribe(ws)
     elif action == "sync_check":
-        keys = msg.get("keys", [])
-        await _handle_sync_check(ws, keys)
+        ids = [normalize_player_id(k) for k in msg.get("keys", []) if isinstance(k, str)]
+        await _handle_sync_check(ws, ids)
     else:
         await _safe_send_text(ws, {"type": "error", "message": f"Unknown action: {action}"})
 
 
-async def _handle_create(ws: WebSocket) -> None:
-    # A connection can only host one room at a time.
-    existing = connections.get(ws)
-    if existing is not None:
-        await _safe_send_text(ws, {"type": "error", "message": "Already in a room"})
-        return
-
-    code = generate_code()
-    while code in rooms:
-        code = generate_code()
-
-    room = Room(code=code, host=ws)
-    rooms[code] = room
-    connections[ws] = room
-    log.info("room %s created", code)
-    await _safe_send_text(ws, {"type": "created", "room": code})
-
-
-async def _handle_join(ws: WebSocket, code: str) -> None:
-    code = code.upper().strip()
-    room = rooms.get(code)
-    if room is None:
-        await _safe_send_text(ws, {"type": "error", "message": "Room not found"})
-        return
-
-    if ws in room.spectators or ws is room.host:
-        await _safe_send_text(ws, {"type": "error", "message": "Already in this room"})
-        return
-
-    # Leave any previous room first.
-    remove_connection(ws)
-
-    room.spectators.add(ws)
-    connections[ws] = room
-    log.info("room %s spectator joined (%d total)", code, len(room.spectators))
-    await _safe_send_text(ws, {"type": "joined", "room": code})
-    await _notify_viewers(room)
-
-
-async def _handle_close(ws: WebSocket) -> None:
-    room = connections.get(ws)
-    if room is None or ws is not room.host:
-        await _safe_send_text(ws, {"type": "error", "message": "Not hosting a room"})
-        return
-
-    for spec in list(room.spectators):
-        await _safe_send_text(spec, {"type": "closed"})
-        connections.pop(spec, None)
-        asyncio.create_task(spec.close())
-
-    rooms.pop(room.code, None)
-    connections.pop(ws, None)
-    log.info("room %s closed by host", room.code)
-
-
 async def _handle_create_netplay(ws: WebSocket, uid: str) -> None:
-    if connections.get(ws) or netplay_connections.get(ws):
+    if netplay_connections.get(ws):
         await _safe_send_text(ws, {"type": "error", "message": "Already in a room"})
         return
 
     code = generate_code()
-    while code in rooms or code in netplay_rooms:
+    while code in netplay_rooms:
         code = generate_code()
 
     np_room = NetplayRoom(code=code)
@@ -369,7 +302,8 @@ async def _handle_join_netplay(ws: WebSocket, code: str, uid: str) -> None:
         }))
 
 
-async def _handle_go_live(ws: WebSocket, uid: str, name: str) -> None:
+async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
+                          display_id: str, name: str) -> None:
     # Replacing an existing channel for this uid (reconnect).
     existing = live_channels.get(uid)
     if existing is not None:
@@ -378,18 +312,34 @@ async def _handle_go_live(ws: WebSocket, uid: str, name: str) -> None:
             return
         # Reconnect: move subscribers to the new socket.
         subscribers = existing.subscribers
-        live_subscriptions_update = {s: uid for s in subscribers}
-        live_subscriptions.update(live_subscriptions_update)
+        live_subscriptions.update({s: uid for s in subscribers})
         existing.host = ws
         existing.name = name or existing.name
-        log.info("live %s host reconnected (%d subscribers)", uid[:8], len(subscribers))
-        await _safe_send_text(ws, {"type": "live_started", "uid": uid, "subscribers": len(subscribers)})
+        log.info("live %s host reconnected (%d subscribers)",
+                 existing.display_id, len(subscribers))
+        await _safe_send_text(ws, {
+            "type": "live_started",
+            "uid": uid,
+            "player_id": existing.display_id,
+            "subscribers": len(subscribers),
+        })
         return
 
-    channel = LiveChannel(uid=uid, name=name, host=ws)
+    # Another connection live under this player ID: replace it (stale host).
+    clash = channels_by_player_id.get(player_id)
+    if clash is not None:
+        log.info("live %s replaced by new host", clash.display_id)
+        await _teardown_channel(clash.uid)
+
+    channel = LiveChannel(uid=uid, player_id=player_id,
+                          display_id=display_id or player_id, name=name, host=ws)
     live_channels[uid] = channel
-    log.info("live %s started (%s)", uid[:8], name or "anonymous")
-    await _safe_send_text(ws, {"type": "live_started", "uid": uid, "subscribers": 0})
+    channels_by_player_id[player_id] = channel
+    log.info("live %s started (%s)", channel.display_id, name or "anonymous")
+    await _safe_send_text(ws, {
+        "type": "live_started", "uid": uid,
+        "player_id": channel.display_id, "subscribers": 0,
+    })
 
 
 async def _handle_stop_live(ws: WebSocket) -> None:
@@ -398,16 +348,14 @@ async def _handle_stop_live(ws: WebSocket) -> None:
         await _safe_send_text(ws, {"type": "error", "message": "Not live"})
         return
 
-    channel = live_channels.pop(uid)
-    for sub in list(channel.subscribers):
-        asyncio.create_task(_safe_send_text(sub, {"type": "live_ended", "uid": uid}))
-        live_subscriptions.pop(sub, None)
-    log.info("live %s stopped", uid[:8])
+    display_id = live_channels[uid].display_id
+    await _teardown_channel(uid)
+    log.info("live %s stopped", display_id)
     await _safe_send_text(ws, {"type": "live_stopped"})
 
 
-async def _handle_subscribe(ws: WebSocket, uid: str) -> None:
-    channel = live_channels.get(uid)
+async def _handle_subscribe(ws: WebSocket, player_id: str) -> None:
+    channel = channels_by_player_id.get(player_id)
     if channel is None:
         await _safe_send_text(ws, {"type": "error", "message": "Player is not live"})
         return
@@ -420,10 +368,14 @@ async def _handle_subscribe(ws: WebSocket, uid: str) -> None:
             old_channel.subscribers.discard(ws)
 
     channel.subscribers.add(ws)
-    live_subscriptions[ws] = uid
-    log.info("live %s subscriber joined (%d total)", uid[:8], len(channel.subscribers))
+    live_subscriptions[ws] = channel.uid
+    log.info("live %s subscriber joined (%d total)",
+             channel.display_id, len(channel.subscribers))
     await _safe_send_text(ws, {
-        "type": "subscribed", "uid": uid, "name": channel.name,
+        "type": "subscribed",
+        "uid": channel.uid,
+        "player_id": channel.display_id,
+        "name": channel.name,
     })
     # Notify the host of the new viewer count.
     await _safe_send_text(channel.host, {
@@ -444,13 +396,21 @@ async def _handle_unsubscribe(ws: WebSocket) -> None:
     await _safe_send_text(ws, {"type": "unsubscribed"})
 
 
-async def _handle_sync_check(ws: WebSocket, keys: list) -> None:
-    # Return which of the given keys are currently live.
+async def _handle_sync_check(ws: WebSocket, ids: list[str]) -> None:
+    # Return which of the given player IDs are currently live.
     live = []
-    for key in keys:
-        channel = live_channels.get(key)
+    seen: set[str] = set()
+    for pid in ids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        channel = channels_by_player_id.get(pid)
         if channel is not None:
-            live.append({"uid": key, "name": channel.name, "viewers": len(channel.subscribers)})
+            live.append({
+                "player_id": channel.display_id,
+                "name": channel.name,
+                "viewers": len(channel.subscribers),
+            })
     await _safe_send_text(ws, {"type": "sync_status", "live": live})
 
 
@@ -461,15 +421,6 @@ async def _handle_binary(ws: WebSocket, data: bytes) -> None:
         channel = live_channels[live_uid]
         for sub in list(channel.subscribers):
             asyncio.create_task(_safe_send_bytes(sub, data))
-        return
-
-    # Spectate room: host fans out to spectators.
-    room = connections.get(ws)
-    if room is not None:
-        if ws is not room.host:
-            return
-        for spec in list(room.spectators):
-            asyncio.create_task(_safe_send_bytes(spec, data))
         return
 
     # Netplay room: route to all OTHER players.

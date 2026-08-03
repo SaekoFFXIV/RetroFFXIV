@@ -10,6 +10,7 @@ namespace EmulatorStream;
 // Hosts a streaming session: captures the emulator framebuffer at 30 fps,
 // integer-upscales it, H.264-encodes, and pushes to the relay over WebSocket.
 // Audio is tapped from the core's ring buffer and sent as raw PCM.
+// Identity-based: the host goes live under their player ID — no room codes.
 public sealed class StreamHost : IDisposable
 {
     private const int StreamScale = 3;
@@ -29,7 +30,7 @@ public sealed class StreamHost : IDisposable
 
     private byte[] upscaleBuf = Array.Empty<byte>();
 
-    public string? RoomCode { get; private set; }
+    public string? PlayerId { get; private set; }
     public int ViewerCount { get; private set; }
     public bool IsHosting { get; private set; }
     public bool IsLive { get; private set; }
@@ -45,95 +46,8 @@ public sealed class StreamHost : IDisposable
         this.log = log;
     }
 
-    public async Task StartAsync()
-    {
-        if (IsHosting)
-            return;
-
-        cts = new CancellationTokenSource();
-        var token = cts.Token;
-
-        Status = "Connecting...";
-        StateChanged?.Invoke();
-
-        ws = new ClientWebSocket();
-        try
-        {
-            var uri = new Uri(relayUrl.TrimEnd('/') + "/ws");
-            await ws.ConnectAsync(uri, token);
-        }
-        catch (Exception ex)
-        {
-            Status = $"Connection failed: {ex.Message}";
-            StateChanged?.Invoke();
-            Cleanup();
-            return;
-        }
-
-        // Ask the relay to create a room.
-        await SendControlAsync(new ControlMsg { Action = "create" }, token);
-
-        // Wait for the "created" response.
-        var response = await ReceiveControlAsync(token);
-        if (response?.Type == "created" && response.Room != null)
-        {
-            RoomCode = response.Room;
-            IsHosting = true;
-            Status = $"Hosting — room {RoomCode}";
-            log($"Streaming room created: {RoomCode}");
-        }
-        else
-        {
-            Status = $"Failed to create room: {response?.Message ?? "unknown error"}";
-            StateChanged?.Invoke();
-            Cleanup();
-            return;
-        }
-
-        StateChanged?.Invoke();
-
-        // Send stream info so spectators know the format.
-        var info = StreamProtocol.PackStreamInfo(
-            backend.BaseWidth * StreamScale,
-            backend.BaseHeight * StreamScale,
-            StreamFps,
-            (int)backend.SampleRate);
-        await SendBinaryAsync(info, token);
-
-        // Start the video and audio send loops.
-        sendLoop = Task.Run(() => VideoLoopAsync(token), token);
-        audioLoop = Task.Run(() => AudioLoopAsync(token), token);
-
-        // Start a receive loop for control messages (viewer count, etc.).
-        _ = Task.Run(() => ControlLoopAsync(token), token);
-    }
-
-    public async Task StopAsync()
-    {
-        if (!IsHosting)
-            return;
-
-        Status = "Stopping...";
-        StateChanged?.Invoke();
-
-        try
-        {
-            if (ws is { State: WebSocketState.Open })
-            {
-                await SendControlAsync(new ControlMsg { Action = "close" }, CancellationToken.None);
-            }
-        }
-        catch { }
-
-        Cleanup();
-        RoomCode = null;
-        ViewerCount = 0;
-        Status = "Idle";
-        StateChanged?.Invoke();
-    }
-
-    // Identity-based streaming: go live with a persistent_key instead of a room code.
-    public async Task GoLiveAsync(string uid, string name)
+    // Identity-based streaming: go live with a persistent_key and player ID.
+    public async Task GoLiveAsync(string uid, string name, string playerId)
     {
         if (IsHosting || IsLive)
             return;
@@ -158,16 +72,18 @@ public sealed class StreamHost : IDisposable
             return;
         }
 
-        await SendControlAsync(new ControlMsg { Action = "go_live", Uid = uid, Name = name }, token);
+        await SendControlAsync(
+            new ControlMsg { Action = "go_live", Uid = uid, PlayerId = playerId, Name = name }, token);
 
         var response = await ReceiveControlAsync(token);
         if (response?.Type == "live_started")
         {
             IsLive = true;
             IsHosting = true;
+            PlayerId = response.PlayerId ?? playerId;
             ViewerCount = response.Subscribers ?? 0;
             Status = $"Live as {name} — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
-            log($"Went live: uid={uid[..Math.Min(8, uid.Length)]}, name={name}");
+            log($"Went live: player_id={PlayerId}, name={name}");
         }
         else
         {
@@ -340,9 +256,7 @@ public sealed class StreamHost : IDisposable
                     {
                         var prev = ViewerCount;
                         ViewerCount = msg.Count.Value;
-                        Status = IsLive
-                            ? $"Live — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}"
-                            : $"Hosting — room {RoomCode} — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
+                        Status = $"Live — {ViewerCount} viewer{(ViewerCount == 1 ? "" : "s")}";
                         // Force a keyframe so new/rejoining spectators can decode immediately.
                         if (ViewerCount > prev)
                             encoder?.ForceKeyFrame();

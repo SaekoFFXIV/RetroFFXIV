@@ -99,6 +99,11 @@ public sealed class ControlMsg
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Uid { get; set; }
 
+    // Live streaming fields: the short public player ID ("1234-5678").
+    [JsonPropertyName("player_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlayerId { get; set; }
+
     [JsonPropertyName("slot")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Slot { get; set; }
@@ -144,8 +149,8 @@ public sealed class NetplayPlayerInfo
 
 public sealed class LivePlayerInfo
 {
-    [JsonPropertyName("uid")]
-    public string Uid { get; set; } = "";
+    [JsonPropertyName("player_id")]
+    public string PlayerId { get; set; } = "";
 
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";

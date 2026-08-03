@@ -28,6 +28,9 @@ public enum InputMode
 
 public sealed class SyncFriend
 {
+    // Player ID ("1234-5678") — Lodestone-derived, the public handle friends
+    // exchange.  Older configs may still hold raw XIVAuth keys; those entries
+    // need re-adding by ID.
     public string Key { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
 }
@@ -72,6 +75,9 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     public float ScreenOpacity { get; set; } = 0.85f; // 0-1
     public float[]? ScreenPosition { get; set; }    // saved world position [x, y, z]
 
+    // Saved world positions for watched streams, keyed by player ID.
+    public Dictionary<string, float[]> WatchScreenPositions { get; set; } = new();
+
     // Build a StreamConfig snapshot for the shared streaming library.
     public StreamConfig GetStreamConfig() => new()
     {
@@ -80,7 +86,6 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         ScreenWidth = ScreenWidth,
         ScreenHeight = ScreenHeight,
         ScreenOpacity = ScreenOpacity,
-        ScreenPosition = ScreenPosition,
     };
 
     public Dictionary<string, int> KeyBindings { get; set; } = DefaultKeyBindings();

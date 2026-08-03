@@ -2,11 +2,11 @@
 Standalone spectator — watch a stream in a window, no sound.
 
 Usage:
-    python spectator.py <ROOM_CODE> [relay_url]
+    python spectator.py <PLAYER_ID> [relay_url]
 
 Examples:
-    python spectator.py 7CFB
-    python spectator.py 7CFB wss://relay.nekomail.cc
+    python spectator.py 1234-5678
+    python spectator.py 1234-5678 wss://relay.nekomail.cc
 
 Requires:  pip install opencv-python av websockets
 """
@@ -49,21 +49,22 @@ def decode_and_display(h264_data: bytes, codec: av.CodecContext) -> None:
             print(f"  decode error #{decode_errors}: {e} (data={len(h264_data)}B, first4={h264_data[:4].hex()})")
 
 
-async def receive_loop(room_code: str, relay_url: str) -> None:
+async def receive_loop(player_id: str, relay_url: str) -> None:
     global connected
     url = relay_url.rstrip("/") + "/ws"
     print(f"Connecting to {url} ...")
 
     async with websockets.connect(url) as ws:
-        # Join the room.
-        await ws.send(json.dumps({"action": "join", "room": room_code}))
+        # Subscribe to the player's live stream by ID.
+        await ws.send(json.dumps({"action": "subscribe", "player_id": player_id}))
         r = json.loads(await ws.recv())
-        if r.get("type") != "joined":
-            print(f"Failed to join: {r}")
+        if r.get("type") != "subscribed":
+            print(f"Failed to subscribe: {r}")
             return
 
         connected = True
-        print(f"Joined room {room_code} — waiting for frames (Ctrl+C to quit)")
+        name = r.get("name") or player_id
+        print(f"Watching {name} — waiting for frames (Ctrl+C to quit)")
 
         codec = av.CodecContext.create("h264", "r")
 
@@ -85,8 +86,8 @@ async def receive_loop(room_code: str, relay_url: str) -> None:
 
             elif isinstance(message, str):
                 msg = json.loads(message)
-                if msg.get("type") == "closed":
-                    print("Host ended the stream.")
+                if msg.get("type") == "live_ended":
+                    print("Player stopped streaming.")
                     break
 
 
@@ -95,18 +96,18 @@ def main() -> None:
         print(__doc__)
         sys.exit(1)
 
-    room_code = sys.argv[1].upper()
+    player_id = sys.argv[1]
     relay_url = sys.argv[2] if len(sys.argv) > 2 else RELAY
 
     # Start the async receiver in a background thread.
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=loop.run_until_complete,
-                         args=(receive_loop(room_code, relay_url),),
+                         args=(receive_loop(player_id, relay_url),),
                          daemon=True)
     t.start()
 
     # OpenCV display loop on the main thread.
-    window_name = f"SNES Stream — {room_code}"
+    window_name = f"SNES Stream — {player_id}"
     print("Opening window... (it may take a few seconds for the first frame)")
 
     try:

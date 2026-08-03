@@ -1,9 +1,10 @@
 """
-Local integration test for the SNES relay — no FFXIV, no audio, no plugin.
+Local integration test for the Retro FFXIV relay — no FFXIV, no audio, no plugin.
 
 Tests:
-  1. Spectate: host creates room → spectator joins → host sends fake video
-     → spectator receives it.
+  1. Live streaming: host goes live under a player ID → sync_check shows
+     them live → spectator subscribes by ID → receives video/audio →
+     stop_live notifies the spectator.
   2. Netplay: two players create/join → exchange input packets → both
      receive each other's inputs.
 
@@ -38,28 +39,43 @@ def ok(name: str, cond: bool, detail: str = ""):
         print(f"  ✗ {name}  {detail}")
 
 
-async def test_spectate():
-    print("\n── Spectate ──")
+async def test_live_streaming():
+    print("\n── Live streaming (identity-based) ──")
 
     host = await websockets.connect(RELAY)
     spec = await websockets.connect(RELAY)
+    checker = await websockets.connect(RELAY)
 
-    # Host creates a room.
-    await host.send(json.dumps({"action": "create"}))
+    uid = "test-persistent-key-aaaa"
+    player_id = "1234-5678"
+
+    # Host goes live.
+    await host.send(json.dumps({
+        "action": "go_live", "uid": uid,
+        "player_id": player_id, "name": "Test Player",
+    }))
     r = json.loads(await host.recv())
-    ok("host creates room", r.get("type") == "created" and len(r.get("room", "")) == 4, str(r))
-    room = r["room"]
+    ok("host goes live", r.get("type") == "live_started" and r.get("player_id") == player_id, str(r))
 
-    # Spectator joins.
-    await spec.send(json.dumps({"action": "join", "room": room}))
+    # sync_check reports the channel as live.
+    await checker.send(json.dumps({"action": "sync_check", "keys": [player_id, "9999-9999"]}))
+    r = json.loads(await checker.recv())
+    live = r.get("live", [])
+    ok("sync_check shows live", r.get("type") == "sync_status"
+       and len(live) == 1 and live[0]["player_id"] == player_id
+       and live[0]["name"] == "Test Player", str(r))
+
+    # Spectator subscribes by player ID.
+    await spec.send(json.dumps({"action": "subscribe", "player_id": player_id}))
     r = json.loads(await spec.recv())
-    ok("spectator joins", r.get("type") == "joined", str(r))
+    ok("spectator subscribes", r.get("type") == "subscribed"
+       and r.get("player_id") == player_id and r.get("name") == "Test Player", str(r))
 
     # Host gets viewer count.
     r = json.loads(await host.recv())
     ok("host sees 1 viewer", r.get("type") == "viewers" and r.get("count") == 1, str(r))
 
-    # Host sends fake video + audio + stream info.
+    # Host sends fake stream info + video + audio.
     fake_video = bytes([0x01]) + b"\x00\x00\x00\x01fake-h264-nal"
     fake_audio = bytes([0x02]) + struct.pack("<4h", 100, -100, 200, -200)
     fake_info  = bytes([0x03]) + json.dumps({"width": 768, "height": 672, "fps": 30, "sample_rate": 32000}).encode()
@@ -68,7 +84,6 @@ async def test_spectate():
     await host.send(fake_video)
     await host.send(fake_audio)
 
-    # Spectator should receive all three, in order.
     got_info  = await spec.recv()
     got_video = await spec.recv()
     got_audio = await spec.recv()
@@ -77,15 +92,36 @@ async def test_spectate():
     ok("spectator gets video",       isinstance(got_video, bytes) and got_video == fake_video)
     ok("spectator gets audio",       isinstance(got_audio, bytes) and got_audio == fake_audio)
 
-    # Spectator's binary should be ignored (only host can send).
+    # Spectator's binary should be ignored (only the host fans out).
     await spec.send(bytes([0x01]) + b"should-be-ignored")
-    # Host should NOT receive it — send a control ping to verify the pipe.
-    await host.send(json.dumps({"action": "close"}))
+
+    # Subscribing to a player who is not live fails.
+    other = await websockets.connect(RELAY)
+    await other.send(json.dumps({"action": "subscribe", "player_id": "9999-9999"}))
+    r = json.loads(await other.recv())
+    ok("subscribe to offline player fails", r.get("type") == "error", str(r))
+    await other.close()
+
+    # Host stops streaming; spectator is notified.
+    await host.send(json.dumps({"action": "stop_live"}))
+    r = json.loads(await host.recv())
+    ok("host stops live", r.get("type") == "live_stopped", str(r))
     r = json.loads(await spec.recv())
-    ok("host close notifies spectator", r.get("type") == "closed", str(r))
+    ok("spectator notified of live_ended", r.get("type") == "live_ended", str(r))
+
+    # sync_check is now empty.
+    await checker.send(json.dumps({"action": "sync_check", "keys": [player_id]}))
+    r = json.loads(await checker.recv())
+    ok("sync_check empty after stop", r.get("type") == "sync_status" and r.get("live") == [], str(r))
+
+    # Room codes are gone: the old actions are unknown.
+    await checker.send(json.dumps({"action": "create"}))
+    r = json.loads(await checker.recv())
+    ok("room mode removed", r.get("type") == "error", str(r))
 
     await host.close()
     await spec.close()
+    await checker.close()
 
 
 async def test_netplay():
@@ -154,11 +190,11 @@ async def test_netplay():
 
 
 async def main():
-    print("SNES Relay integration test")
+    print("Retro FFXIV Relay integration test")
     print(f"Target: {RELAY}")
 
     try:
-        await test_spectate()
+        await test_live_streaming()
         await test_netplay()
     except ConnectionRefusedError:
         print("\n✗ Cannot connect to relay — is it running?  (python server.py)")

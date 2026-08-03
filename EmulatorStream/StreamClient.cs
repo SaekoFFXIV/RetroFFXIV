@@ -8,8 +8,8 @@ using NAudio.Wave;
 
 namespace EmulatorStream;
 
-// Spectator-side streaming client: connects to the relay with a room code,
-// receives H.264 + PCM, decodes video to RGBA32, and plays audio.
+// Spectator-side streaming client: subscribes to a live player by their
+// player ID, receives H.264 + PCM, decodes video to RGBA32, and plays audio.
 // The latest decoded frame is exposed for ImGui texture upload.
 public sealed class StreamClient : IDisposable
 {
@@ -25,6 +25,7 @@ public sealed class StreamClient : IDisposable
     private BufferedWaveProvider? audioBuffer;
     private WasapiOut? audioOutput;
     private int sampleRate = 32000;
+    private bool audioEnabled = true;
 
     // Latest decoded frame (thread-safe via lock).
     private readonly object frameLock = new();
@@ -34,10 +35,11 @@ public sealed class StreamClient : IDisposable
     private long frameVersion;
 
     public bool IsConnected { get; private set; }
-    public string? RoomCode { get; private set; }
     public string? SubscribedUid { get; private set; }
+    public string? SubscribedPlayerId { get; private set; }
     public string? SubscribedName { get; private set; }
     public string Status { get; private set; } = "Idle";
+    public bool AudioEnabled => audioEnabled;
 
     public event Action? StateChanged;
 
@@ -47,63 +49,16 @@ public sealed class StreamClient : IDisposable
         this.log = log;
     }
 
-    public async Task ConnectAsync(string roomCode)
+    // Only one watched stream plays audio at a time; the others stay muted.
+    public void SetAudioEnabled(bool enabled)
     {
-        if (IsConnected)
-            return;
-
-        cts = new CancellationTokenSource();
-        var token = cts.Token;
-
-        Status = "Connecting...";
-        StateChanged?.Invoke();
-
-        ws = new ClientWebSocket();
-        try
+        audioEnabled = enabled;
+        if (!enabled)
         {
-            var uri = new Uri(relayUrl.TrimEnd('/') + "/ws");
-            await ws.ConnectAsync(uri, token);
+            audioOutput?.Dispose();
+            audioOutput = null;
+            audioBuffer = null;
         }
-        catch (Exception ex)
-        {
-            Status = $"Connection failed: {ex.Message}";
-            StateChanged?.Invoke();
-            Cleanup();
-            return;
-        }
-
-        // Join the room.
-        var joinJson = new ControlMsg { Action = "join", Room = roomCode.ToUpperInvariant() }.ToJson();
-        await ws.SendAsync(
-            new ArraySegment<byte>(Encoding.UTF8.GetBytes(joinJson)),
-            WebSocketMessageType.Text, true, token);
-
-        // Wait for the join response.
-        var buffer = new byte[4096];
-        var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-        if (result.MessageType == WebSocketMessageType.Text)
-        {
-            var msg = ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count));
-            if (msg?.Type == "joined")
-            {
-                RoomCode = roomCode.ToUpperInvariant();
-                IsConnected = true;
-                Status = $"Watching room {RoomCode}";
-                log($"Joined stream room: {RoomCode}");
-            }
-            else
-            {
-                Status = $"Join failed: {msg?.Message ?? "unknown error"}";
-                StateChanged?.Invoke();
-                Cleanup();
-                return;
-            }
-        }
-
-        StateChanged?.Invoke();
-
-        decoder = new H264Decoder();
-        receiveLoop = Task.Run(() => ReceiveLoopAsync(token), token);
     }
 
     public async Task DisconnectAsync()
@@ -115,13 +70,15 @@ public sealed class StreamClient : IDisposable
         StateChanged?.Invoke();
 
         Cleanup();
-        RoomCode = null;
+        SubscribedUid = null;
+        SubscribedPlayerId = null;
+        SubscribedName = null;
         Status = "Idle";
         StateChanged?.Invoke();
     }
 
-    // Identity-based: subscribe to a player's live stream by their persistent_key.
-    public async Task SubscribeAsync(string uid)
+    // Subscribe to a player's live stream by their player ID ("1234-5678").
+    public async Task SubscribeAsync(string playerId)
     {
         if (IsConnected)
             return;
@@ -146,7 +103,7 @@ public sealed class StreamClient : IDisposable
             return;
         }
 
-        var json = new ControlMsg { Action = "subscribe", Uid = uid }.ToJson();
+        var json = new ControlMsg { Action = "subscribe", PlayerId = playerId }.ToJson();
         await ws.SendAsync(
             new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
             WebSocketMessageType.Text, true, token);
@@ -158,11 +115,12 @@ public sealed class StreamClient : IDisposable
             var msg = ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count));
             if (msg?.Type == "subscribed")
             {
-                SubscribedUid = uid;
+                SubscribedUid = msg.Uid;
+                SubscribedPlayerId = msg.PlayerId ?? playerId;
                 SubscribedName = msg.Name;
                 IsConnected = true;
-                Status = $"Watching {SubscribedName ?? uid[..Math.Min(8, uid.Length)]}";
-                log($"Subscribed to live stream: {SubscribedName} ({uid[..Math.Min(8, uid.Length)]})");
+                Status = $"Watching {SubscribedName ?? SubscribedPlayerId}";
+                log($"Subscribed to live stream: {SubscribedName} ({SubscribedPlayerId})");
             }
             else
             {
@@ -181,7 +139,7 @@ public sealed class StreamClient : IDisposable
 
     public async Task UnsubscribeAsync()
     {
-        if (!IsConnected || SubscribedUid == null)
+        if (!IsConnected || SubscribedPlayerId == null)
             return;
 
         try
@@ -198,6 +156,7 @@ public sealed class StreamClient : IDisposable
 
         Cleanup();
         SubscribedUid = null;
+        SubscribedPlayerId = null;
         SubscribedName = null;
         Status = "Idle";
         StateChanged?.Invoke();
@@ -296,7 +255,8 @@ public sealed class StreamClient : IDisposable
                 if (info != null)
                 {
                     sampleRate = info.SampleRate > 0 ? info.SampleRate : 32000;
-                    InitAudio(sampleRate);
+                    if (audioEnabled)
+                        InitAudio(sampleRate);
                     log($"Stream info: {info.Width}x{info.Height} @ {info.Fps}fps, audio {sampleRate}Hz");
                 }
                 break;
@@ -337,6 +297,7 @@ public sealed class StreamClient : IDisposable
             IsConnected = false;
             Status = msg.Type == "live_ended" ? "Player stopped streaming" : "Host ended the stream";
             SubscribedUid = null;
+            SubscribedPlayerId = null;
             SubscribedName = null;
             StateChanged?.Invoke();
             Cleanup();

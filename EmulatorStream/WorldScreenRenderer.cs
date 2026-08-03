@@ -8,9 +8,11 @@ using Dalamud.Plugin.Services;
 
 namespace EmulatorStream;
 
-// Renders the spectator's video stream as a screen placed in the game world.
+// Renders a video stream as a screen placed in the game world.
 // Placement: the screen appears 3 yalms in front of the player at eye height.
 // Walk to where you want it, then click to confirm.
+// One instance per screen (local play or one watched stream each); positions
+// are owned by the caller via the savedPosition/persistPosition pair.
 public sealed class WorldScreenRenderer
 {
     private readonly IGameGui gameGui;
@@ -19,6 +21,7 @@ public sealed class WorldScreenRenderer
     private readonly Func<Vector3?> getPlayerPos;
     private readonly Func<float> getPlayerRot;
     private readonly Func<List<Vector3>> getNearbyPlayerPositions;
+    private readonly Action<float[]>? persistPosition;
 
     public bool PlacementMode { get; set; }
     public Vector3 ScreenPosition { get; set; }
@@ -36,7 +39,9 @@ public sealed class WorldScreenRenderer
         StreamConfig config,
         Func<Vector3?> getPlayerPos,
         Func<float> getPlayerRot,
-        Func<List<Vector3>> getNearbyPlayerPositions)
+        Func<List<Vector3>> getNearbyPlayerPositions,
+        float[]? savedPosition = null,
+        Action<float[]>? persistPosition = null)
     {
         this.gameGui = gameGui;
         this.textureProvider = textureProvider;
@@ -44,10 +49,11 @@ public sealed class WorldScreenRenderer
         this.getPlayerPos = getPlayerPos;
         this.getPlayerRot = getPlayerRot;
         this.getNearbyPlayerPositions = getNearbyPlayerPositions;
+        this.persistPosition = persistPosition;
 
-        if (config.ScreenPosition is { Length: 3 })
+        if (savedPosition is { Length: 3 })
         {
-            ScreenPosition = new Vector3(config.ScreenPosition[0], config.ScreenPosition[1], config.ScreenPosition[2]);
+            ScreenPosition = new Vector3(savedPosition[0], savedPosition[1], savedPosition[2]);
             IsPlaced = true;
         }
     }
@@ -218,9 +224,15 @@ public sealed class WorldScreenRenderer
             && gameGui.WorldToScreen(bl, out sbl);
     }
 
+    public void ClearPlacement()
+    {
+        IsPlaced = false;
+        persistPosition?.Invoke(Array.Empty<float>());
+    }
+
     private void SavePosition()
     {
-        config.ScreenPosition = new[] { ScreenPosition.X, ScreenPosition.Y, ScreenPosition.Z };
+        persistPosition?.Invoke(new[] { ScreenPosition.X, ScreenPosition.Y, ScreenPosition.Z });
     }
 
     public void Dispose()

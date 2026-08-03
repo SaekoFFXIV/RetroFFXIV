@@ -17,20 +17,25 @@ namespace SnesEmulator;
 public sealed class XivAuthService : IDisposable
 {
     private const string BaseUrl = "https://xivauth.net";
-    private const string ClientId = "019fc434-675d-743c-97e9-514dfb5137fd";
-    private const string Scope = "user character refresh";
+    // The OAuth client ID (not the app ID) of the RetroFFXIV client on xivauth.net.
+    private const string ClientId = "rXPG4dUdHmUcDJP5U55YHLxIChFQ19hozifpolJdd_0";
+    // character / character:all / character:manage are mutually exclusive on
+    // XIVAuth; the plugin reads the character list, so it needs character:all.
+    private const string Scope = "user character:all refresh";
     private const string DeviceGrantType = "urn:ietf:params:oauth:grant-type:device_code";
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
     private readonly Configuration config;
     private readonly Action<string> log;
+    private readonly Action saveConfig;
     private CancellationTokenSource? pollCts;
 
-    public XivAuthService(Configuration config, Action<string> log)
+    public XivAuthService(Configuration config, Action<string> log, Action saveConfig)
     {
         this.config = config;
         this.log = log;
+        this.saveConfig = saveConfig;
     }
 
     // --- State ---
@@ -43,6 +48,7 @@ public sealed class XivAuthService : IDisposable
     public string DeviceCode { get; private set; } = string.Empty;
     public string UserCode { get; private set; } = string.Empty;
     public string VerificationUrl { get; private set; } = string.Empty;
+    public string LoginUrl { get; private set; } = string.Empty;
     public string Status { get; private set; } = string.Empty;
     public string Error { get; private set; } = string.Empty;
 
@@ -66,7 +72,9 @@ public sealed class XivAuthService : IDisposable
                 new("scope", Scope),
             });
 
-            var response = await Http.PostAsync($"{BaseUrl}/oauth/device/code", body);
+            // XIVAuth's doorkeeper fork mounts the device-code endpoint at
+            // /oauth/authorize_device, not the RFC's /device/code path.
+            var response = await Http.PostAsync($"{BaseUrl}/oauth/authorize_device", body);
             var json = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
@@ -90,11 +98,25 @@ public sealed class XivAuthService : IDisposable
             DeviceCode = device.DeviceCode;
             UserCode = device.UserCode;
             VerificationUrl = device.VerificationUri;
-            Status = $"Enter code {UserCode} at {VerificationUrl}";
+            // The approval page pre-fills the code when given user_code, so open
+            // verification_uri_complete (or build the equivalent) automatically.
+            LoginUrl = !string.IsNullOrEmpty(device.VerificationUriComplete)
+                ? device.VerificationUriComplete
+                : $"{device.VerificationUri}?user_code={Uri.EscapeDataString(device.UserCode)}";
+            Status = $"Approve code {UserCode} in your browser.";
             IsPolling = true;
             Notify();
 
             log($"XIVAuth: device code issued, user_code={UserCode}");
+
+            try
+            {
+                Dalamud.Utility.Util.OpenLink(LoginUrl);
+            }
+            catch (Exception ex)
+            {
+                log($"XIVAuth: could not open browser automatically: {ex.Message}");
+            }
 
             pollCts = new CancellationTokenSource();
             _ = Task.Run(() => PollForTokenAsync(device.Interval, pollCts.Token));
@@ -186,6 +208,7 @@ public sealed class XivAuthService : IDisposable
         config.XivAuthAccessToken = tokenResponse.AccessToken ?? string.Empty;
         config.XivAuthRefreshToken = tokenResponse.RefreshToken ?? string.Empty;
         config.XivAuthTokenExpiry = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + tokenResponse.ExpiresIn - 60;
+        saveConfig();
 
         IsPolling = false;
         Status = "Fetching character...";
@@ -270,8 +293,9 @@ public sealed class XivAuthService : IDisposable
                 return;
             }
 
-            var characters = JsonSerializer.Deserialize<CharacterListResponse>(json);
-            var character = characters?.Data is { Count: > 0 } ? characters.Data[0] : null;
+            // The characters index renders a bare JSON array, not a wrapped object.
+            var characters = JsonSerializer.Deserialize<List<CharacterModel>>(json);
+            var character = characters is { Count: > 0 } ? characters[0] : null;
 
             if (character == null)
             {
@@ -284,8 +308,9 @@ public sealed class XivAuthService : IDisposable
 
             config.PlayerPersistentKey = character.PersistentKey;
             config.PlayerCharacterName = character.Name;
-            config.PlayerLodestoneId = character.LodestoneId;
+            config.PlayerLodestoneId = long.TryParse(character.LodestoneId, out var lodestoneId) ? lodestoneId : 0;
             config.PlayerWorld = character.HomeWorld;
+            saveConfig();
 
             Status = string.Empty;
             Error = string.Empty;
@@ -310,6 +335,7 @@ public sealed class XivAuthService : IDisposable
         DeviceCode = string.Empty;
         UserCode = string.Empty;
         VerificationUrl = string.Empty;
+        LoginUrl = string.Empty;
         Status = string.Empty;
         Error = string.Empty;
 
@@ -320,6 +346,7 @@ public sealed class XivAuthService : IDisposable
         config.PlayerCharacterName = string.Empty;
         config.PlayerLodestoneId = 0;
         config.PlayerWorld = string.Empty;
+        saveConfig();
 
         log("XIVAuth: logged out");
         Notify();
@@ -331,6 +358,20 @@ public sealed class XivAuthService : IDisposable
         !string.IsNullOrEmpty(config.PlayerPersistentKey)
             ? config.PlayerPersistentKey
             : config.PlayerUid;
+
+    // The short public player ID (Lightless/PlayerSync style): the
+    // character's Lodestone ID split by a dash in the middle,
+    // e.g. 12345678 → "1234-5678".  Empty when not logged in.
+    public string GetPlayerId() => FormatPlayerId(config.PlayerLodestoneId);
+
+    public static string FormatPlayerId(long lodestoneId)
+    {
+        if (lodestoneId <= 0)
+            return string.Empty;
+        var digits = lodestoneId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var split = digits.Length / 2;
+        return $"{digits[..split]}-{digits[split..]}";
+    }
 
     public void Dispose()
     {
@@ -345,6 +386,7 @@ public sealed class XivAuthService : IDisposable
         [JsonPropertyName("device_code")] public string DeviceCode { get; set; } = "";
         [JsonPropertyName("user_code")] public string UserCode { get; set; } = "";
         [JsonPropertyName("verification_uri")] public string VerificationUri { get; set; } = "";
+        [JsonPropertyName("verification_uri_complete")] public string VerificationUriComplete { get; set; } = "";
         [JsonPropertyName("expires_in")] public int ExpiresIn { get; set; }
         [JsonPropertyName("interval")] public int Interval { get; set; } = 5;
     }
@@ -364,15 +406,11 @@ public sealed class XivAuthService : IDisposable
         [JsonPropertyName("error_description")] public string? ErrorDescription { get; set; }
     }
 
-    private sealed class CharacterListResponse
-    {
-        [JsonPropertyName("data")] public List<CharacterModel>? Data { get; set; }
-    }
-
     private sealed class CharacterModel
     {
         [JsonPropertyName("persistent_key")] public string PersistentKey { get; set; } = "";
-        [JsonPropertyName("lodestone_id")] public long LodestoneId { get; set; }
+        // The API renders lodestone_id as a string.
+        [JsonPropertyName("lodestone_id")] public string LodestoneId { get; set; } = "";
         [JsonPropertyName("name")] public string Name { get; set; } = "";
         [JsonPropertyName("home_world")] public string HomeWorld { get; set; } = "";
         [JsonPropertyName("data_center")] public string DataCenter { get; set; } = "";

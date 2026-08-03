@@ -2,13 +2,13 @@
 Fake host — generates a test pattern and streams it through the relay.
 Use this to verify the spectator window works without FFXIV.
 
+Goes live under a fixed dev player ID (1234-5678).
+
 Usage:
     python fake_host.py [relay_url]
 
 Then in another terminal:
-    python spectator.py <ROOM_CODE> [relay_url]
-
-The room code is printed when the host starts.
+    python spectator.py 1234-5678 [relay_url]
 
 Requires:  pip install av websockets
 """
@@ -25,6 +25,8 @@ import numpy as np
 import websockets
 
 RELAY = "wss://relay.nekomail.cc"
+UID = "fake-host-dev-uid"
+PLAYER_ID = "1234-5678"
 WIDTH, HEIGHT, FPS = 768, 672, 30
 BITRATE = 2_000_000
 
@@ -72,16 +74,18 @@ async def main():
 
     print(f"Connecting to {url} ...")
     async with websockets.connect(url) as ws:
-        # Create a spectate room.
-        await ws.send(json.dumps({"action": "create"}))
+        # Go live under the dev player ID.
+        await ws.send(json.dumps({
+            "action": "go_live", "uid": UID,
+            "player_id": PLAYER_ID, "name": "Fake Host",
+        }))
         r = json.loads(await ws.recv())
-        if r.get("type") != "created":
+        if r.get("type") != "live_started":
             print(f"Failed: {r}")
             return
 
-        room = r["room"]
-        print(f"Room: {room}")
-        print(f"Watch with:  python spectator.py {room} {relay_url}")
+        print(f"Live as player ID {PLAYER_ID}")
+        print(f"Watch with:  python spectator.py {PLAYER_ID} {relay_url}")
         print("Streaming test pattern... (Ctrl+C to stop)")
 
         # Send stream info.

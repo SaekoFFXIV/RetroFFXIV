@@ -12,5 +12,4 @@ public sealed class StreamConfig
     public float ScreenWidth { get; set; } = 1.5f;
     public float ScreenHeight { get; set; } = 1.2f;
     public float ScreenOpacity { get; set; } = 0.85f;
-    public float[]? ScreenPosition { get; set; }
 }

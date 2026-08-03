@@ -1,8 +1,11 @@
-# SNES Relay
+# Retro FFXIV Relay
 
-WebSocket fan-out hub for the FFXIV SNES emulator plugin. The host pushes one
-H.264 + PCM stream in; the relay copies it verbatim to every spectator in the
-room. No decoding, no re-encoding — a dumb pipe with room codes.
+WebSocket hub for the RetroFFXIV emulator plugin. Streaming is
+identity-based: a host goes live under their **player ID** (a short
+numeric code like `1234-5678`, derived from their FFXIV Lodestone ID via
+XIVAuth) and friends subscribe by that ID — no room codes. The relay also
+routes lockstep netplay inputs. No decoding, no re-encoding — a dumb pipe
+with routing.
 
 ## Quick start (local dev)
 
@@ -59,20 +62,31 @@ anyone's home address.
 | `RELAY_HOST` | `0.0.0.0` | Bind address      |
 | `RELAY_PORT` | `8765`    | Listen port       |
 
-## Protocol
+## Streaming protocol
 
 **Text (JSON) — control plane:**
 
-| Direction          | Message                                      |
-|--------------------|----------------------------------------------|
-| Host → Relay       | `{"action": "create"}`                       |
-| Relay → Host       | `{"type": "created", "room": "A1B2"}`        |
-| Relay → Host       | `{"type": "viewers", "count": 3}`            |
-| Spectator → Relay  | `{"action": "join", "room": "A1B2"}`         |
-| Relay → Spectator  | `{"type": "joined", "room": "A1B2"}`         |
-| Relay → Spectator  | `{"type": "closed"}`                         |
-| Host → Relay       | `{"action": "close"}`                        |
-| Relay → either     | `{"type": "error", "message": "..."}`        |
+| Direction          | Message                                                                  |
+|--------------------|--------------------------------------------------------------------------|
+| Host → Relay       | `{"action": "go_live", "uid": "<persistent_key>", "player_id": "1234-5678", "name": "Character Name"}` |
+| Relay → Host       | `{"type": "live_started", "uid": "…", "player_id": "1234-5678", "subscribers": 0}` |
+| Relay → Host       | `{"type": "viewers", "count": 3}`                                        |
+| Host → Relay       | `{"action": "stop_live"}`                                               |
+| Relay → Host       | `{"type": "live_stopped"}`                                              |
+| Spectator → Relay  | `{"action": "subscribe", "player_id": "1234-5678"}`                     |
+| Relay → Spectator  | `{"type": "subscribed", "uid": "…", "player_id": "1234-5678", "name": "…"}` |
+| Spectator → Relay  | `{"action": "unsubscribe"}`                                             |
+| Relay → Spectator  | `{"type": "live_ended", "uid": "…"}`                                    |
+| Client → Relay     | `{"action": "sync_check", "keys": ["1234-5678", …]}`                    |
+| Relay → Client     | `{"type": "sync_status", "live": [{"player_id": "1234-5678", "name": "…", "viewers": 2}]}` |
+| Relay → either     | `{"type": "error", "message": "..."}`                                   |
+
+`uid` is the XIVAuth persistent_key (channel identity, used for
+reconnects). `player_id` is the short public code friends exchange; the
+relay indexes live channels by it. Player IDs compare on digits only
+(`1234-5678` == `12345678`). Reconnecting host with the same uid reclaims
+the channel and keeps its subscribers; a new host under the same player_id
+replaces a stale one.
 
 **Binary — data plane (host → relay → spectators):**
 
