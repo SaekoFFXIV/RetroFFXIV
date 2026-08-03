@@ -102,6 +102,7 @@ public sealed class EmulatorService : IDisposable
     private readonly System.Collections.Generic.Dictionary<string, WorldScreenRenderer> watchScreens = new();
     private readonly System.Collections.Generic.Dictionary<string, long> watchVersions = new();
     private readonly System.Collections.Generic.Dictionary<string, long> watchScreenStateVersions = new();
+    private WorldScreenState? lastPublishedLiveScreenState;
 
     // Live presence for synced friends (polled via sync_check).
     private readonly System.Collections.Generic.Dictionary<string, LivePlayerInfo> liveStatus = new();
@@ -244,6 +245,47 @@ public sealed class EmulatorService : IDisposable
     }
 
     private void PublishLocalScreenState() => streamPanel?.PublishScreenState(CreateLocalScreenState());
+
+    // A placement can be made while the host WebSocket is still negotiating
+    // its go-live acknowledgement. In that narrow window StreamHost retains
+    // the state locally but cannot send it yet, leaving new spectators with a
+    // valid video stream and no world placement. Reconcile after IsLive turns
+    // true, then only publish again when the host-owned state changes.
+    private void SynchronizeLiveScreenState()
+    {
+        if (streamPanel is not { IsLive: true })
+        {
+            lastPublishedLiveScreenState = null;
+            return;
+        }
+
+        var current = CreateLocalScreenState();
+        if (WorldScreenStatesEqual(current, lastPublishedLiveScreenState))
+            return;
+
+        streamPanel.PublishScreenState(current);
+        lastPublishedLiveScreenState = current?.Clone();
+    }
+
+    private static bool WorldScreenStatesEqual(WorldScreenState? left, WorldScreenState? right)
+    {
+        if (ReferenceEquals(left, right))
+            return true;
+        if (left is null || right is null || left.Width != right.Width)
+            return false;
+        if (left.Position is null || right.Position is null)
+            return left.Position is null && right.Position is null;
+        if (left.Position.Length != right.Position.Length)
+            return false;
+
+        for (var i = 0; i < left.Position.Length; i++)
+        {
+            if (left.Position[i] != right.Position[i])
+                return false;
+        }
+
+        return true;
+    }
 
     private System.Collections.Generic.List<Vector3> GetNearbyPlayerPositions()
     {
@@ -1776,7 +1818,10 @@ public sealed class EmulatorService : IDisposable
         if (registered && core is { IsGameLoaded: true })
         {
             if (ImGui.Button("Start stream", new Vector2(-1, 0)))
+            {
+                lastPublishedLiveScreenState = null;
                 streamPanel?.GoLive(uid, config.PlayerCharacterName, config.PlayerId, CreateLocalScreenState());
+            }
             return;
         }
 
@@ -2377,6 +2422,8 @@ public sealed class EmulatorService : IDisposable
     {
         if (worldScreen == null) return;
 
+        SynchronizeLiveScreenState();
+
         if (config.UseDxWorldScreen)
         {
             dxScreen?.Enable();
@@ -2432,6 +2479,8 @@ public sealed class EmulatorService : IDisposable
             {
                 watchScreenStateVersions[key] = stateVersion;
                 renderer.ApplyRemoteState(state);
+                if (renderer.IsPlaced)
+                    streamPanel.SetWindowVisible(key, false);
             }
 
             var version = watchVersions.TryGetValue(key, out var v) ? v : -1L;
@@ -2580,6 +2629,8 @@ public sealed class EmulatorService : IDisposable
             {
                 watchScreenStateVersions[key] = stateVersion;
                 renderer.ApplyRemoteState(state);
+                if (renderer.IsPlaced)
+                    streamPanel.SetWindowVisible(key, false);
             }
 
             if (!renderer.IsPlaced)
