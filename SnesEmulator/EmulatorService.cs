@@ -140,6 +140,10 @@ public sealed class EmulatorService : IDisposable
     private bool panelOpen = true;
     private bool screenOn;
     private int selectedDeckTab;
+    // Child windows retain their ImGui scroll state across layout reloads.
+    // Reset a tab once when it becomes active so its first controls cannot
+    // reopen clipped under the fixed tab bar.
+    private int resetDeckContentScrollTab;
 
     // CRT power animation: 0 = off, 1 = fully on, in-between = animating.
     private float crtAnim;          // current animation progress [0..1]
@@ -690,7 +694,10 @@ public sealed class EmulatorService : IDisposable
             }
 
             if (ImGui.Button($"{DeckTabLabels[i]}##deck_tab_{i}", new Vector2(tabWidth, 0f)))
+            {
                 selectedDeckTab = i;
+                resetDeckContentScrollTab = i;
+            }
 
             if (active)
                 ImGui.PopStyleColor(3);
@@ -699,9 +706,14 @@ public sealed class EmulatorService : IDisposable
         ImGui.Separator();
     }
 
-    private static void BeginTabContent(string id)
+    private void BeginTabContent(string id)
     {
         ImGui.BeginChild(id, Vector2.Zero, false, ImGuiWindowFlags.AlwaysUseWindowPadding);
+        if (resetDeckContentScrollTab == selectedDeckTab)
+        {
+            ImGui.SetScrollY(0f);
+            resetDeckContentScrollTab = -1;
+        }
     }
 
     private static void EndTabContent()
