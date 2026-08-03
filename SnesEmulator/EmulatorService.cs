@@ -107,6 +107,14 @@ public sealed class EmulatorService : IDisposable
     // Relay presence (who is online).
     private RelayPresence? presence;
 
+    // DX11 depth-integrated world screens.
+    private readonly Rendering.DxWorldRenderer? dxScreen;
+    private long dxLocalVersion = -1;
+    private byte[]? dxLocalFrame;
+    private int dxLocalW, dxLocalH;
+    private readonly System.Collections.Generic.Dictionary<string, long> dxWatchVersions = new();
+    private readonly System.Collections.Generic.Dictionary<string, (byte[] Rgba, int W, int H)> dxWatchFrames = new();
+
     private RetroCore? core;
     private AudioPlayer? audio;
     private IDalamudTextureWrap? texture;
@@ -135,7 +143,7 @@ public sealed class EmulatorService : IDisposable
 
     public event Action? CloseRequested;
 
-    public EmulatorService(Configuration config, IDalamudPluginInterface pluginInterface, ITextureProvider textureProvider, IPluginLog log, InputManager inputManager, IFramework framework, IGameGui gameGui, IObjectTable objectTable)
+    public EmulatorService(Configuration config, IDalamudPluginInterface pluginInterface, ITextureProvider textureProvider, IPluginLog log, InputManager inputManager, IFramework framework, IGameGui gameGui, IObjectTable objectTable, IGameInteropProvider interop)
     {
         this.config = config;
         this.pluginInterface = pluginInterface;
@@ -172,6 +180,7 @@ public sealed class EmulatorService : IDisposable
             () => core,
             () => pluginInterface.SavePluginConfig(config));
         presence = new RelayPresence(msg => log.Information("[Presence] {Msg}", msg));
+        dxScreen = new Rendering.DxWorldRenderer(interop, log);
         netplayPanel = new NetplayPanel(
             config,
             msg => log.Information("[Netplay] {Msg}", msg),
@@ -1942,6 +1951,15 @@ public sealed class EmulatorService : IDisposable
 
         ImGui.TextWrapped("Your local screen only appears in the world while you are live.");
 
+        var dx = config.UseDxWorldScreen;
+        if (ImGui.Checkbox("DX11 depth integration (experimental)", ref dx))
+        {
+            config.UseDxWorldScreen = dx;
+            SaveConfig();
+        }
+        if (dxScreen is { Failed: true })
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "DX11 mode failed to initialise — falling back to the overlay.");
+
         if (watchScreens.Count > 0)
             ImGui.TextWrapped(
                 "Watched streams get their own screens — use the Screen button in the friend list to place them.");
@@ -1961,6 +1979,22 @@ public sealed class EmulatorService : IDisposable
     public void DrawWorldScreen()
     {
         if (worldScreen == null) return;
+
+        if (config.UseDxWorldScreen)
+        {
+            dxScreen?.Enable();
+            DrawDxWorldScreen();
+
+            // Placement overlays still render through ImGui.
+            if (worldScreen.PlacementMode)
+                worldScreen.Draw();
+            foreach (var renderer in watchScreens.Values)
+                if (renderer.PlacementMode)
+                    renderer.Draw();
+            return;
+        }
+
+        dxScreen?.Disable();
 
         // Local screen: it is the in-world broadcast of your stream, so it
         // only exists while you are live (placement mode always draws).
@@ -2015,6 +2049,82 @@ public sealed class EmulatorService : IDisposable
 
     private long localScreenVersion = -1;
 
+    // DX11 path: estimate the camera, gather quads + frames, hand them to
+    // the renderer; the Present hook draws them with the scene depth.
+    private void DrawDxWorldScreen()
+    {
+        if (dxScreen == null || dxScreen.Failed || streamPanel == null)
+            return;
+
+        var io = ImGui.GetIO();
+        Matrix4x4? vp = null;
+        var camPos = GetPlayerPos();
+        if (camPos != null &&
+            Rendering.CameraEstimator.TryEstimate(gameGui, new Vector2(io.DisplaySize.X, io.DisplaySize.Y), camPos.Value + new Vector3(0, 1.5f, 0), out var m))
+        {
+            vp = m;
+        }
+
+        var quads = new System.Collections.Generic.List<Rendering.DxWorldRenderer.ScreenQuad>();
+        var frames = new System.Collections.Generic.Dictionary<string, (byte[], int, int)>();
+
+        // Local screen (only while live).
+        if (streamPanel.IsLive && worldScreen!.IsPlaced && core is { IsGameLoaded: true })
+        {
+            var localVer = core.FrameVersion;
+            if (localVer != dxLocalVersion && core.TryGetFrame(out var rgba, out var w, out var h))
+            {
+                dxLocalVersion = localVer;
+                dxLocalFrame = rgba;
+                dxLocalW = w;
+                dxLocalH = h;
+            }
+
+            if (dxLocalFrame != null)
+            {
+                quads.Add(new Rendering.DxWorldRenderer.ScreenQuad
+                {
+                    Id = "local",
+                    Center = worldScreen.ScreenPosition,
+                    HalfWidth = config.ScreenWidth / 2f,
+                    HalfHeight = config.ScreenHeight / 2f,
+                });
+                frames["local"] = (dxLocalFrame, dxLocalW, dxLocalH);
+            }
+        }
+
+        // Watched streams with a placed screen.
+        foreach (var client in streamPanel.Clients)
+        {
+            if (client.SubscribedPlayerId == null)
+                continue;
+            var key = StreamPanel.NormalizeId(client.SubscribedPlayerId);
+            if (!watchScreens.TryGetValue(key, out var renderer) || !renderer.IsPlaced)
+                continue;
+
+            var version = dxWatchVersions.TryGetValue(key, out var v) ? v : -1L;
+            if (client.TryGetFrame(ref version, out var rgba, out var w, out var h))
+            {
+                dxWatchVersions[key] = version;
+                dxWatchFrames[key] = (rgba, w, h);
+            }
+
+            if (dxWatchFrames.TryGetValue(key, out var frame))
+            {
+                quads.Add(new Rendering.DxWorldRenderer.ScreenQuad
+                {
+                    Id = key,
+                    Center = renderer.ScreenPosition,
+                    HalfWidth = config.ScreenWidth / 2f,
+                    HalfHeight = config.ScreenHeight / 2f,
+                });
+                frames[key] = frame;
+            }
+        }
+
+        dxScreen.SubmitFrame(vp, quads, frames);
+    }
+
     internal WorldScreenRenderer? WorldScreen => worldScreen;
 
     public void Dispose()
@@ -2026,6 +2136,7 @@ public sealed class EmulatorService : IDisposable
         streamPanel = null;
         presence?.Dispose();
         presence = null;
+        dxScreen?.Dispose();
         netplayPanel?.Dispose();
         netplayPanel = null;
         worldScreen?.Dispose();

@@ -27,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+    [PluginService] internal static IGameInteropProvider GameInteropProvider { get; private set; } = null!;
 
     internal Configuration Configuration { get; private set; } = null!;
 
@@ -45,7 +46,7 @@ public sealed class Plugin : IDalamudPlugin
         Configuration = (PluginInterface.GetPluginConfig() as Configuration) ?? new Configuration();
 
         var input = new InputManager(Configuration, KeyState);
-        emulator = new EmulatorService(Configuration, PluginInterface, TextureProvider, Log, input, Framework, GameGui, ObjectTable);
+        emulator = new EmulatorService(Configuration, PluginInterface, TextureProvider, Log, input, Framework, GameGui, ObjectTable, GameInteropProvider);
         emulator.CloseRequested += () => showWindow = false;
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)

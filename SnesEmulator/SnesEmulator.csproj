@@ -11,6 +11,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="2.3.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="2.3.0" />
+    <PackageReference Include="Vortice.DXGI" Version="2.3.0" />
   </ItemGroup>
   <ItemGroup>
     <None Include="bsnes_libretro.dll" CopyToOutputDirectory="PreserveNewest" />

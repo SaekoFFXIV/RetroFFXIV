@@ -80,6 +80,9 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     public float ScreenOpacity { get; set; } = 0.85f; // 0-1
     public float[]? ScreenPosition { get; set; }    // saved world position [x, y, z]
 
+    // DX11 depth-integrated world screens (experimental; ImGui overlay otherwise).
+    public bool UseDxWorldScreen { get; set; }
+
     // Saved world positions for watched streams, keyed by player ID.
     public Dictionary<string, float[]> WatchScreenPositions { get; set; } = new();
 
