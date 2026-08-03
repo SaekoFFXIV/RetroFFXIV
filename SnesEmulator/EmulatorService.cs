@@ -2425,31 +2425,20 @@ public sealed class EmulatorService : IDisposable
 
         SynchronizeLiveScreenState();
 
-        // DX11's retained scene-depth comparison is what lets characters and
-        // objects stand in front of the video. Never silently replace a
-        // failed DX path with an ImGui video overlay: it has no scene depth
-        // and would paint through characters.
+        // Always submit watched screen state through the DX path. Besides
+        // preparing depth-rendered quads, this applies the host placement and
+        // hides the default Stream Viewer window for remote viewers.
         if (config.UseDxWorldScreen)
         {
-            if (dxScreen is { Failed: false })
-            {
-                dxScreen.Enable();
-                if (dxScreen.Enabled && !dxScreen.Failed)
-                {
-                    DrawDxWorldScreen();
+            dxScreen?.Enable();
+            DrawDxWorldScreen();
 
-                    // Placement overlays still render through ImGui.
-                    if (worldScreen.PlacementMode)
-                        worldScreen.Draw();
-                    foreach (var renderer in watchScreens.Values)
-                        if (renderer.PlacementMode)
-                            renderer.Draw();
-                    return;
-                }
-            }
-
-            // A failed Present hook must not produce an unoccluded in-world
-            // video layer. The settings UI surfaces the failure instead.
+            // Placement overlays still render through ImGui.
+            if (worldScreen.PlacementMode)
+                worldScreen.Draw();
+            foreach (var renderer in watchScreens.Values)
+                if (renderer.PlacementMode)
+                    renderer.Draw();
             return;
         }
 
