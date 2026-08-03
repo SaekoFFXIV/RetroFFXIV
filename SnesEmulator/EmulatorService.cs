@@ -1950,6 +1950,13 @@ public sealed class EmulatorService : IDisposable
     // Draw the viewer windows for watched streams (called from Plugin.Draw).
     public void DrawViewerWindow() => streamPanel?.DrawViewerWindows();
 
+    // The main window just closed: end the session (stop live, stop watching,
+    // close viewer windows — world screens disappear with them).
+    public void OnMainWindowClosed()
+    {
+        streamPanel?.StopAll();
+    }
+
     // Draw the world-placed screens (called from Plugin.Draw every frame).
     public void DrawWorldScreen()
     {
@@ -1973,6 +1980,9 @@ public sealed class EmulatorService : IDisposable
         }
 
         if (streamPanel == null) return;
+
+        // Reconcile even with the deck closed (stopped watches drop here).
+        streamPanel.FlushRemoveQueue();
 
         // One world screen per watched stream; feed each from its client.
         var active = new System.Collections.Generic.HashSet<string>();

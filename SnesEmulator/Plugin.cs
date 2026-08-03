@@ -32,6 +32,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly EmulatorService emulator;
     private bool showWindow;
+    private bool windowWasOpen;
 
     public Plugin()
     {
@@ -74,12 +75,20 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!showWindow)
         {
+            if (windowWasOpen)
+            {
+                windowWasOpen = false;
+                emulator.OnMainWindowClosed();
+            }
+
             emulator.SetFocused(false);
             emulator.SetWindowOpen(false);
             // World screens live independently of the control deck.
             emulator.DrawWorldScreen();
             return;
         }
+
+        windowWasOpen = true;
 
         emulator.SetWindowOpen(true);
         emulator.DrawMainWindow(ref showWindow);

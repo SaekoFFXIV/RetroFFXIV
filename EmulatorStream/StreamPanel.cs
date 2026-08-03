@@ -102,6 +102,15 @@ public sealed class StreamPanel : IDisposable
             _ = Task.Run(() => host.StopLiveAsync());
     }
 
+    // End the whole session: stop hosting and drop every watched stream
+    // (viewer windows hide, world screens lose their clients).
+    public void StopAll()
+    {
+        StopLive();
+        foreach (var key in viewers.Keys.ToList())
+            StopWatching(key);
+    }
+
     // --- Watching (up to MaxStreams concurrent) ---
 
     public bool IsWatching(string playerId) => viewers.ContainsKey(NormalizeId(playerId));
@@ -179,8 +188,9 @@ public sealed class StreamPanel : IDisposable
     public bool IsWindowVisible(string playerId) =>
         viewers.TryGetValue(NormalizeId(playerId), out var viewer) && viewer.ShowWindow;
 
-    // Drop watchers whose connection ended since the last pass.
-    private void FlushRemoveQueue()
+    // Drop watchers whose connection ended since the last pass.  Public so
+    // the world-screen pass can reconcile even while the deck is closed.
+    public void FlushRemoveQueue()
     {
         List<string> pending;
         lock (removeQueue)
