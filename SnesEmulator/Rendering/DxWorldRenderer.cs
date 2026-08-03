@@ -97,6 +97,8 @@ public sealed class DxWorldRenderer : IDisposable
     private IntPtr capturedDsv;
     private ID3D11DepthStencilView? capturedDsvWrapper;
     private bool? reverseZ;
+    private bool row3Calibrated;
+    private List<(Vector3 P, Vector2 Pixel)> calibPoints = new();
     private bool resourcesReady;
     private bool failed;
     private int loggedErrors;
@@ -282,7 +284,8 @@ public sealed class DxWorldRenderer : IDisposable
     // --- game-thread API ------------------------------------------------
 
     public void SubmitFrame(Matrix4x4? viewProj, List<ScreenQuad> quads,
-        Dictionary<string, (byte[] Rgba, int W, int H)> frames)
+        Dictionary<string, (byte[] Rgba, int W, int H)> frames,
+        List<(Vector3 P, Vector2 Pixel)> calib)
     {
         lock (frameLock)
         {
@@ -290,6 +293,7 @@ public sealed class DxWorldRenderer : IDisposable
             if (viewProj.HasValue)
                 this.viewProj = viewProj.Value;
             this.quads = quads;
+            calibPoints = calib;
             pendingFrames.Clear();
             pendingSizes.Clear();
             foreach (var (id, (rgba, w, h)) in frames)
@@ -407,7 +411,7 @@ public sealed class DxWorldRenderer : IDisposable
                 return;
             if (!hasViewProj)
             {
-                LogIdle("camera estimation failing");
+                LogIdle($"camera estimation failing: {CameraEstimator.LastDiagnostic}");
                 return;
             }
             vp = viewProj;
@@ -456,6 +460,12 @@ public sealed class DxWorldRenderer : IDisposable
 
             if (reverseZ == null)
                 DetectReverseZ();
+
+            if (!row3Calibrated && !TryCalibrateRow3())
+            {
+                LogIdle("depth row calibration pending");
+                return;
+            }
 
             if (!loggedFirstDraw)
             {
@@ -687,6 +697,128 @@ public sealed class DxWorldRenderer : IDisposable
         {
             log.Error($"[DxScreen] depth probe failed: {ex.Message}");
             reverseZ = false;
+        }
+    }
+
+    // Row 3 (the depth row) is unobservable from 2D correspondences, so fit
+    // it to the live depth buffer: for visible surface points p with stored
+    // depth d, clip.z/clip.w = d ⇒ r3·p = d·(r4·p). Four ScreenToWorld
+    // points give a 4x4 system.
+    private bool TryCalibrateRow3()
+    {
+        List<(Vector3 P, Vector2 Pixel)> calib;
+        Vector4 r4;
+        lock (frameLock)
+        {
+            if (calibPoints.Count < 4)
+                return false;
+            calib = calibPoints;
+            r4 = new Vector4(viewProj.M41, viewProj.M42, viewProj.M43, viewProj.M44);
+        }
+
+        var resPtr = ViewGetResource(capturedDsv);
+        if (resPtr == IntPtr.Zero)
+            return false;
+
+        using var resource = new ID3D11Resource(resPtr);
+        using var depthTex = resource.QueryInterface<ID3D11Texture2D>();
+        var isD24 = (int)depthTex.Description.Format == DxgiFormatD24UNormS8UInt;
+
+        var ca = new double[4, 4];
+        var cb = new double[4];
+        for (var i = 0; i < 4; i++)
+        {
+            var (p, pixel) = calib[i];
+            var d = ReadDepthAt(depthTex, isD24, (int)pixel.X, (int)pixel.Y);
+            if (d == null)
+                return false;
+
+            ca[i, 0] = p.X; ca[i, 1] = p.Y; ca[i, 2] = p.Z; ca[i, 3] = 1;
+            cb[i] = d.Value * (r4.X * p.X + r4.Y * p.Y + r4.Z * p.Z + r4.W);
+        }
+
+        // 4x4 Gaussian elimination.
+        var r3 = new double[4];
+        for (var c = 0; c < 4; c++)
+        {
+            var pivot = c;
+            for (var r = c + 1; r < 4; r++)
+                if (Math.Abs(ca[r, c]) > Math.Abs(ca[pivot, c]))
+                    pivot = r;
+            if (Math.Abs(ca[pivot, c]) < 1e-9)
+                return false;
+            if (pivot != c)
+            {
+                for (var j = 0; j < 4; j++)
+                    (ca[c, j], ca[pivot, j]) = (ca[pivot, j], ca[c, j]);
+                (cb[c], cb[pivot]) = (cb[pivot], cb[c]);
+            }
+
+            for (var r = c + 1; r < 4; r++)
+            {
+                var f = ca[r, c] / ca[c, c];
+                for (var j = c; j < 4; j++)
+                    ca[r, j] -= f * ca[c, j];
+                cb[r] -= f * cb[c];
+            }
+        }
+
+        for (var r = 3; r >= 0; r--)
+        {
+            var sum = cb[r];
+            for (var j = r + 1; j < 4; j++)
+                sum -= ca[r, j] * r3[j];
+            r3[r] = sum / ca[r, r];
+        }
+
+        lock (frameLock)
+        {
+            viewProj.M31 = (float)r3[0];
+            viewProj.M32 = (float)r3[1];
+            viewProj.M33 = (float)r3[2];
+            viewProj.M34 = (float)r3[3];
+        }
+
+        row3Calibrated = true;
+        log.Information("[DxScreen] depth row calibrated");
+        return true;
+    }
+
+    private float? ReadDepthAt(ID3D11Texture2D depthTex, bool isD24, int x, int y)
+    {
+        try
+        {
+            var stagingDesc = new Texture2DDescription
+            {
+                Width = 1,
+                Height = 1,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = depthTex.Description.Format,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+            };
+
+            using var staging = device!.CreateTexture2D(stagingDesc);
+            context!.CopySubresourceRegion(depthTex, 0, x, y, 0, staging, 0);
+            context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None, out var mapped);
+            try
+            {
+                var raw = Marshal.ReadInt32(mapped.DataPointer);
+                if (isD24)
+                    return (raw & 0x00FFFFFF) / (float)0x00FFFFFF;
+                unsafe { return *(float*)&raw; }
+            }
+            finally
+            {
+                context.Unmap(staging, 0);
+            }
+        }
+        catch
+        {
+            return null;
         }
     }
 

@@ -2065,6 +2065,18 @@ public sealed class EmulatorService : IDisposable
             vp = m;
         }
 
+        // Depth-row calibration points: the actual visible surface at a few
+        // screen positions, paired with their pixels.
+        var calib = new System.Collections.Generic.List<(Vector3, Vector2)>();
+        foreach (var (fx, fy) in new[] { (0.5f, 0.5f), (0.35f, 0.4f), (0.65f, 0.4f), (0.5f, 0.65f), (0.3f, 0.6f), (0.7f, 0.6f) })
+        {
+            var px = new Vector2(io.DisplaySize.X * fx, io.DisplaySize.Y * fy);
+            if (gameGui.ScreenToWorld(px, out var wp, 100f))
+                calib.Add((wp, px));
+            if (calib.Count >= 4)
+                break;
+        }
+
         var quads = new System.Collections.Generic.List<Rendering.DxWorldRenderer.ScreenQuad>();
         var frames = new System.Collections.Generic.Dictionary<string, (byte[], int, int)>();
 
@@ -2122,7 +2134,7 @@ public sealed class EmulatorService : IDisposable
             }
         }
 
-        dxScreen.SubmitFrame(vp, quads, frames);
+        dxScreen.SubmitFrame(vp, quads, frames, calib);
     }
 
     internal WorldScreenRenderer? WorldScreen => worldScreen;
