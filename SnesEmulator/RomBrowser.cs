@@ -13,6 +13,7 @@ namespace SnesEmulator;
 public sealed class RomBrowser
 {
     private static readonly string[] ArchiveExtensions = { ".zip" };
+    private const float MinimumEntryListHeight = 160f;
 
     private readonly Configuration config;
     private readonly Action<string> onSelected;
@@ -101,7 +102,12 @@ public sealed class RomBrowser
     private void DrawEntries()
     {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10, 4));
-        ImGui.BeginChild("##romentries", new Vector2(0, -ImGui.GetTextLineHeightWithSpacing()), true);
+        // The ROM tab can have a tall save-state section above this list.
+        // Do not let the nested file browser collapse to its one-row
+        // remaining height: overflow belongs to the outer tab scroll region.
+        var remainingHeight = ImGui.GetContentRegionAvail().Y - ImGui.GetTextLineHeightWithSpacing();
+        var entryListHeight = Math.Max(MinimumEntryListHeight, remainingHeight);
+        ImGui.BeginChild("##romentries", new Vector2(0, entryListHeight), true);
 
         // Record the click and act only after the loops: navigating clears and refills these lists,
         // which would throw if done mid-enumeration.

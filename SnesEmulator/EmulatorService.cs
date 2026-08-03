@@ -2424,18 +2424,25 @@ public sealed class EmulatorService : IDisposable
 
         SynchronizeLiveScreenState();
 
-        if (config.UseDxWorldScreen)
+        // DX11 depth rendering is preferred, but it is not available on
+        // every spectator's game/client configuration. Do not abandon world
+        // screens in that case: the ImGui world overlay remains a functional
+        // fallback for both local and watched streams.
+        if (config.UseDxWorldScreen && dxScreen is { Failed: false })
         {
-            dxScreen?.Enable();
-            DrawDxWorldScreen();
+            dxScreen.Enable();
+            if (dxScreen.Enabled && !dxScreen.Failed)
+            {
+                DrawDxWorldScreen();
 
-            // Placement overlays still render through ImGui.
-            if (worldScreen.PlacementMode)
-                worldScreen.Draw();
-            foreach (var renderer in watchScreens.Values)
-                if (renderer.PlacementMode)
-                    renderer.Draw();
-            return;
+                // Placement overlays still render through ImGui.
+                if (worldScreen.PlacementMode)
+                    worldScreen.Draw();
+                foreach (var renderer in watchScreens.Values)
+                    if (renderer.PlacementMode)
+                        renderer.Draw();
+                return;
+            }
         }
 
         dxScreen?.Disable();
