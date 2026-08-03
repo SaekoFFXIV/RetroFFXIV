@@ -26,6 +26,7 @@ public sealed class StreamClient : IDisposable
     private WasapiOut? audioOutput;
     private int sampleRate = 32000;
     private bool audioEnabled = true;
+    private float volume = 1f;
 
     // Latest decoded frame (thread-safe via lock).
     private readonly object frameLock = new();
@@ -33,6 +34,12 @@ public sealed class StreamClient : IDisposable
     private int frameWidth;
     private int frameHeight;
     private long frameVersion;
+
+    // Host-authoritative in-world placement, updated through relay control
+    // messages independently of the decoded video frame cadence.
+    private readonly object worldScreenLock = new();
+    private WorldScreenState? worldScreenState;
+    private long worldScreenVersion;
 
     public bool IsConnected { get; private set; }
     public string? SubscribedUid { get; private set; }
@@ -122,6 +129,7 @@ public sealed class StreamClient : IDisposable
                 SubscribedUid = msg.Uid;
                 SubscribedPlayerId = msg.PlayerId ?? playerId;
                 SubscribedName = msg.Name;
+                SetWorldScreenState(msg.Screen);
                 IsConnected = true;
                 Status = $"Watching {SubscribedName ?? SubscribedPlayerId}";
                 log($"Subscribed to live stream: {SubscribedName} ({SubscribedPlayerId})");
@@ -186,6 +194,31 @@ public sealed class StreamClient : IDisposable
             height = frameHeight;
             return true;
         }
+    }
+
+    public bool TryGetWorldScreenState(ref long lastVersion, out WorldScreenState? state)
+    {
+        lock (worldScreenLock)
+        {
+            if (worldScreenVersion == lastVersion)
+            {
+                state = null;
+                return false;
+            }
+
+            lastVersion = worldScreenVersion;
+            state = worldScreenState?.Clone();
+            return true;
+        }
+    }
+
+    // The plugin's master volume applies to the one remote stream that is
+    // currently allowed to play audio.
+    public void SetVolume(float value)
+    {
+        volume = Math.Clamp(value, 0f, 1f);
+        if (audioOutput != null)
+            audioOutput.Volume = volume;
     }
 
     private async Task ReceiveLoopAsync(CancellationToken token)
@@ -296,6 +329,13 @@ public sealed class StreamClient : IDisposable
     private void HandleControl(string json)
     {
         var msg = ControlMsg.Parse(json);
+        if (msg?.Type == "screen_state")
+        {
+            SetWorldScreenState(msg.Screen);
+            StateChanged?.Invoke();
+            return;
+        }
+
         if (msg?.Type is "closed" or "live_ended")
         {
             IsConnected = false;
@@ -305,6 +345,15 @@ public sealed class StreamClient : IDisposable
             SubscribedName = null;
             StateChanged?.Invoke();
             Cleanup();
+        }
+    }
+
+    private void SetWorldScreenState(WorldScreenState? state)
+    {
+        lock (worldScreenLock)
+        {
+            worldScreenState = state?.Clone();
+            worldScreenVersion++;
         }
     }
 
@@ -322,6 +371,7 @@ public sealed class StreamClient : IDisposable
                 BufferDuration = TimeSpan.FromMilliseconds(300),
             };
             audioOutput = new WasapiOut(AudioClientShareMode.Shared, 40);
+            audioOutput.Volume = volume;
             audioOutput.Init(audioBuffer);
             audioOutput.Play();
         }
@@ -366,6 +416,7 @@ public sealed class StreamClient : IDisposable
             latestFrame = null;
             frameVersion = 0;
         }
+        SetWorldScreenState(null);
     }
 
     public void Dispose()

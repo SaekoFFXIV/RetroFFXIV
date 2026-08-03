@@ -27,6 +27,9 @@ public sealed class StreamHost : IDisposable
     private CancellationTokenSource? cts;
     private Task? sendLoop;
     private Task? audioLoop;
+    private readonly SemaphoreSlim sendGate = new(1, 1);
+    private readonly object screenStateLock = new();
+    private WorldScreenState? screenState;
 
     private byte[] upscaleBuf = Array.Empty<byte>();
 
@@ -47,10 +50,13 @@ public sealed class StreamHost : IDisposable
     }
 
     // Identity-based streaming: go live with a persistent_key and player ID.
-    public async Task GoLiveAsync(string uid, string name, string playerId)
+    public async Task GoLiveAsync(string uid, string name, string playerId, WorldScreenState? initialScreen)
     {
         if (IsHosting || IsLive)
             return;
+
+        lock (screenStateLock)
+            screenState = initialScreen?.Clone();
 
         cts = new CancellationTokenSource();
         var token = cts.Token;
@@ -72,8 +78,18 @@ public sealed class StreamHost : IDisposable
             return;
         }
 
+        WorldScreenState? initialState;
+        lock (screenStateLock)
+            initialState = screenState?.Clone();
         await SendControlAsync(
-            new ControlMsg { Action = "go_live", Uid = uid, PlayerId = playerId, Name = name }, token);
+            new ControlMsg
+            {
+                Action = "go_live",
+                Uid = uid,
+                PlayerId = playerId,
+                Name = name,
+                Screen = initialState,
+            }, token);
 
         var response = await ReceiveControlAsync(token);
         if (response?.Type == "live_started")
@@ -127,6 +143,35 @@ public sealed class StreamHost : IDisposable
         ViewerCount = 0;
         Status = "Idle";
         StateChanged?.Invoke();
+    }
+
+    // The host owns the physical screen. This is intentionally independent
+    // from IsLive visibility: a host may hide their local screen while still
+    // giving spectators its authoritative placed position.
+    public void PublishScreenState(WorldScreenState? state)
+    {
+        WorldScreenState? snapshot;
+        lock (screenStateLock)
+        {
+            screenState = state?.Clone();
+            snapshot = screenState?.Clone();
+        }
+
+        if (!IsLive || cts is not { IsCancellationRequested: false })
+            return;
+
+        var publishToken = cts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SendControlAsync(
+                    new ControlMsg { Action = "screen_state", Screen = snapshot }, publishToken);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { log($"Screen-state update failed: {ex.Message}"); }
+        });
     }
 
     private async Task VideoLoopAsync(CancellationToken token)
@@ -328,17 +373,27 @@ public sealed class StreamHost : IDisposable
 
     private async Task SendControlAsync(ControlMsg msg, CancellationToken token)
     {
-        if (ws is not { State: WebSocketState.Open })
-            return;
         var bytes = Encoding.UTF8.GetBytes(msg.ToJson());
-        await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+        await SendAsync(bytes, WebSocketMessageType.Text, token);
     }
 
     private async Task SendBinaryAsync(byte[] data, CancellationToken token)
     {
-        if (ws is not { State: WebSocketState.Open })
-            return;
-        await ws.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, token);
+        await SendAsync(data, WebSocketMessageType.Binary, token);
+    }
+
+    private async Task SendAsync(byte[] data, WebSocketMessageType messageType, CancellationToken token)
+    {
+        await sendGate.WaitAsync(token);
+        try
+        {
+            if (ws is { State: WebSocketState.Open })
+                await ws.SendAsync(new ArraySegment<byte>(data), messageType, true, token);
+        }
+        finally
+        {
+            sendGate.Release();
+        }
     }
 
     private async Task<ControlMsg?> ReceiveControlAsync(CancellationToken token)

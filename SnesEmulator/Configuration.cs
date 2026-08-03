@@ -76,12 +76,17 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
 
     // World screen placement.
     public float ScreenWidth { get; set; } = 1.5f; // yalms
+    // The local broadcast screen is opt-in. Placement remains available while it is hidden.
+    public bool ShowLocalWorldScreen { get; set; }
     public float ScreenHeight { get; set; } = 1.2f; // yalms above ground
     public float ScreenOpacity { get; set; } = 0.85f; // 0-1
-    public float[]? ScreenPosition { get; set; }    // saved world position [x, y, z]
+    // [x, y, z], followed by the outward surface normal [nx, ny, nz] for
+    // object-mounted screens. Three-value legacy placements are accepted and
+    // migrated to a fixed upright orientation the next time they render.
+    public float[]? ScreenPosition { get; set; }
 
-    // DX11 depth-integrated world screens (experimental; ImGui overlay otherwise).
-    public bool UseDxWorldScreen { get; set; }
+    // DX11 depth-integrated world screens are the normal rendering path.
+    public bool UseDxWorldScreen { get; set; } = true;
 
     // Saved world positions for watched streams, keyed by player ID.
     public Dictionary<string, float[]> WatchScreenPositions { get; set; } = new();
@@ -93,7 +98,8 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         PlayerUid = !string.IsNullOrEmpty(PlayerPersistentKey) ? PlayerPersistentKey : PlayerUid,
         ScreenWidth = ScreenWidth,
         ScreenHeight = ScreenHeight,
-        ScreenOpacity = ScreenOpacity,
+        // Opacity is intentionally fixed while the UI has no opacity control.
+        ScreenOpacity = 1f,
     };
 
     public Dictionary<string, int> KeyBindings { get; set; } = DefaultKeyBindings();

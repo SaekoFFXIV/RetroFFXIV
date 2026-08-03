@@ -45,7 +45,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private RetroSerializeSizeDelegate serializeSize = null!;
     private RetroSerializeDelegate serialize = null!;
     private RetroUnserializeDelegate unserialize = null!;
-    private readonly object coreLock = new();
+    // Serialize all calls into the native libretro core without relying on a
+    // CLR Monitor. A Monitor.Exit failure on this boundary used to escape the
+    // background thread and terminate the entire game process.
+    private readonly SemaphoreSlim coreGate = new(1, 1);
 
     private IntPtr systemDirPtr;
     private IntPtr saveDirPtr;
@@ -76,6 +79,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
     // Invoked on the emulation thread immediately before each frame, to refresh input.
     public Action? PreFrame { get; set; }
+
+    // Background-thread failures must be reported, never allowed to reach
+    // AppDomain.UnhandledException (Dalamud treats that as a process crash).
+    public Action<Exception>? BackgroundError { get; set; }
 
     // Latest frame, RGBA32.
     private readonly object frameLock = new();
@@ -230,15 +237,34 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
     }
 
-    public void Reset() => reset();
+    public void Reset()
+    {
+        coreGate.Wait();
+        try
+        {
+            reset();
+        }
+        finally
+        {
+            coreGate.Release();
+        }
+    }
 
     // Advance the emulation by one frame on the calling thread (used to pre-fill audio before the
     // emulation thread starts).
     public void RunFrame()
     {
-        if (IsGameLoaded)
+        coreGate.Wait();
+        try
         {
-            run();
+            if (IsGameLoaded)
+            {
+                run();
+            }
+        }
+        finally
+        {
+            coreGate.Release();
         }
     }
 
@@ -250,7 +276,8 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             return null;
         }
 
-        lock (coreLock)
+        coreGate.Wait();
+        try
         {
             var size = (int)serializeSize().ToUInt32();
             if (size <= 0)
@@ -269,6 +296,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 handle.Free();
             }
         }
+        finally
+        {
+            coreGate.Release();
+        }
     }
 
     // Restore a previously captured state (thread-safe vs. the emulation thread).
@@ -279,7 +310,8 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             return false;
         }
 
-        lock (coreLock)
+        coreGate.Wait();
+        try
         {
             var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
@@ -291,9 +323,34 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 handle.Free();
             }
         }
+        finally
+        {
+            coreGate.Release();
+        }
     }
 
     private void RunLoop()
+    {
+        try
+        {
+            RunLoopCore();
+        }
+        catch (Exception ex)
+        {
+            running = false;
+            try
+            {
+                BackgroundError?.Invoke(ex);
+            }
+            catch
+            {
+                // An error reporter must never turn a contained emulator
+                // failure back into an unhandled process-wide exception.
+            }
+        }
+    }
+
+    private void RunLoopCore()
     {
         var frameTime = 1.0 / Fps;
         var stopwatch = Stopwatch.StartNew();
@@ -310,13 +367,18 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 continue;
             }
 
-            lock (coreLock)
+            coreGate.Wait();
+            try
             {
                 PreFrame?.Invoke();
                 if (IsGameLoaded)
                 {
                     run();
                 }
+            }
+            finally
+            {
+                coreGate.Release();
             }
 
             var now = stopwatch.Elapsed.TotalSeconds;

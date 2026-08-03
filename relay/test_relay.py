@@ -94,9 +94,13 @@ async def test_registration_and_live():
     await other.close()
 
     # Host goes live under their own ID.
+    initial_screen = {
+        "position": [12.5, 3.0, -8.25, 0.0, 0.0, 1.0],
+        "width": 6.0,
+    }
     await host.send(json.dumps({
         "action": "go_live", "uid": uid,
-        "player_id": player_id, "name": "Test Player",
+        "player_id": player_id, "name": "Test Player", "screen": initial_screen,
     }))
     r = json.loads(await host.recv())
     ok("host goes live", r.get("type") == "live_started" and r.get("player_id") == player_id, str(r))
@@ -113,11 +117,32 @@ async def test_registration_and_live():
     await spec.send(json.dumps({"action": "subscribe", "player_id": player_id}))
     r = json.loads(await spec.recv())
     ok("spectator subscribes", r.get("type") == "subscribed"
-       and r.get("player_id") == player_id and r.get("name") == "Test Player", str(r))
+       and r.get("player_id") == player_id and r.get("name") == "Test Player"
+       and r.get("screen") == initial_screen, str(r))
 
     # Host gets viewer count.
     r = json.loads(await host.recv())
     ok("host sees 1 viewer", r.get("type") == "viewers" and r.get("count") == 1, str(r))
+
+    # The host can move/resize the screen while live; current viewers receive
+    # the update and late joiners receive the latest retained state.
+    updated_screen = {
+        "position": [20.0, 4.5, -3.0, 1.0, 0.0, 0.0],
+        "width": 12.5,
+    }
+    await host.send(json.dumps({"action": "screen_state", "screen": updated_screen}))
+    r = json.loads(await spec.recv())
+    ok("spectator receives screen update", r.get("type") == "screen_state"
+       and r.get("screen") == updated_screen, str(r))
+
+    late_spec = await websockets.connect(RELAY)
+    await late_spec.send(json.dumps({"action": "subscribe", "player_id": player_id}))
+    r = json.loads(await late_spec.recv())
+    ok("late spectator receives retained screen", r.get("type") == "subscribed"
+       and r.get("screen") == updated_screen, str(r))
+    r = json.loads(await host.recv())
+    ok("host sees late viewer", r.get("type") == "viewers" and r.get("count") == 2, str(r))
+    await late_spec.close()
 
     # Host sends fake stream info + video + audio.
     fake_video = bytes([0x01]) + b"\x00\x00\x00\x01fake-h264-nal"

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import secrets
 import string
@@ -110,6 +111,7 @@ class LiveChannel:
     name: str               # character name for display
     host: WebSocket
     subscribers: set[WebSocket] = field(default_factory=set)
+    screen: dict | None = None
 
 
 netplay_rooms: dict[str, NetplayRoom] = {}
@@ -342,9 +344,12 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
         if not player_id:
             await _safe_send_text(ws, {"type": "error", "message": "Missing player_id"})
             return
-        await _handle_go_live(ws, uid, player_id, msg.get("player_id", ""), msg.get("name", ""))
+        await _handle_go_live(
+            ws, uid, player_id, msg.get("player_id", ""), msg.get("name", ""), msg.get("screen"))
     elif action == "stop_live":
         await _handle_stop_live(ws)
+    elif action == "screen_state":
+        await _handle_screen_state(ws, msg.get("screen"))
     elif action == "subscribe":
         player_id = normalize_player_id(msg.get("player_id", ""))
         if not player_id:
@@ -445,8 +450,31 @@ async def _handle_presence(ws: WebSocket, uid: str, player_id: str, name: str) -
     await _safe_send_text(ws, {"type": "presence_ok"})
 
 
+def _validate_screen_state(screen: object) -> dict | None:
+    if screen is None:
+        return None
+    if not isinstance(screen, dict):
+        raise ValueError("screen must be an object")
+
+    position = screen.get("position")
+    width = screen.get("width")
+    if not isinstance(position, list) or len(position) not in (3, 6):
+        raise ValueError("screen position must contain 3 or 6 values")
+    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in position):
+        raise ValueError("screen position contains an invalid value")
+    if not isinstance(width, (int, float)) or not math.isfinite(float(width)):
+        raise ValueError("screen width is invalid")
+    if not 0.5 <= float(width) <= 20.0:
+        raise ValueError("screen width is out of range")
+
+    return {
+        "position": [float(value) for value in position],
+        "width": float(width),
+    }
+
+
 async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
-                          display_id: str, name: str) -> None:
+                          display_id: str, name: str, screen: object) -> None:
     # The ID must be the one tied to this account in the registry.
     entry = registry.get(uid)
     if entry is None:
@@ -457,6 +485,12 @@ async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
             "type": "error",
             "message": "Player ID is not registered to this account",
         })
+        return
+
+    try:
+        initial_screen = _validate_screen_state(screen)
+    except ValueError as exc:
+        await _safe_send_text(ws, {"type": "error", "message": str(exc)})
         return
 
     # Replacing an existing channel for this uid (reconnect).
@@ -470,6 +504,7 @@ async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
         live_subscriptions.update({s: uid for s in subscribers})
         existing.host = ws
         existing.name = name or existing.name
+        existing.screen = initial_screen
         log.info("live %s host reconnected (%d subscribers)",
                  existing.display_id, len(subscribers))
         await _safe_send_text(ws, {
@@ -487,7 +522,8 @@ async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
         await _teardown_channel(clash.uid)
 
     channel = LiveChannel(uid=uid, player_id=player_id,
-                          display_id=display_id or player_id, name=name, host=ws)
+                          display_id=display_id or player_id, name=name, host=ws,
+                          screen=initial_screen)
     live_channels[uid] = channel
     channels_by_player_id[player_id] = channel
     log.info("live %s started (%s)", channel.display_id, name or "anonymous")
@@ -507,6 +543,24 @@ async def _handle_stop_live(ws: WebSocket) -> None:
     await _teardown_channel(uid)
     log.info("live %s stopped", display_id)
     await _safe_send_text(ws, {"type": "live_stopped"})
+
+
+async def _handle_screen_state(ws: WebSocket, screen: object) -> None:
+    uid = next((u for u, ch in live_channels.items() if ch.host is ws), None)
+    if uid is None:
+        await _safe_send_text(ws, {"type": "error", "message": "Not live"})
+        return
+
+    try:
+        state = _validate_screen_state(screen)
+    except ValueError as exc:
+        await _safe_send_text(ws, {"type": "error", "message": str(exc)})
+        return
+
+    channel = live_channels[uid]
+    channel.screen = state
+    for subscriber in list(channel.subscribers):
+        asyncio.create_task(_safe_send_text(subscriber, {"type": "screen_state", "screen": state}))
 
 
 async def _handle_subscribe(ws: WebSocket, player_id: str) -> None:
@@ -531,6 +585,7 @@ async def _handle_subscribe(ws: WebSocket, player_id: str) -> None:
         "uid": channel.uid,
         "player_id": channel.display_id,
         "name": channel.name,
+        "screen": channel.screen,
     })
     # Notify the host of the new viewer count.
     await _safe_send_text(channel.host, {

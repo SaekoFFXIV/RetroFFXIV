@@ -18,14 +18,13 @@ public sealed class StreamPanel : IDisposable
 {
     public const int MaxStreams = 4;
 
-    private readonly StreamConfig config;
     private readonly ITextureProvider textureProvider;
     private readonly Action<string> log;
     private readonly Func<IEmulatorBackend?> getBackend;
-    private readonly Action saveConfig;
 
     private StreamHost? host;
     private string relayUrl = string.Empty;
+    private float volume = 1f;
 
     // One entry per watched stream, keyed by player ID.
     private sealed class Viewer
@@ -50,41 +49,17 @@ public sealed class StreamPanel : IDisposable
         StreamConfig config,
         ITextureProvider textureProvider,
         Action<string> log,
-        Func<IEmulatorBackend?> getBackend,
-        Action saveConfig)
+        Func<IEmulatorBackend?> getBackend)
     {
-        this.config = config;
         this.textureProvider = textureProvider;
         this.log = log;
         this.getBackend = getBackend;
-        this.saveConfig = saveConfig;
         relayUrl = config.RelayUrl;
-    }
-
-    // Draw the shared streaming settings (relay URL) inside the Sync tab.
-    public void DrawTab()
-    {
-        DrawRelaySetting();
-    }
-
-    private void DrawRelaySetting()
-    {
-        ImGui.TextUnformatted("Relay");
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.InputTextWithHint("##relay", "wss://relay.example.com", ref relayUrl, 512))
-        {
-            config.RelayUrl = relayUrl;
-            saveConfig();
-        }
-
-        ImGui.TextWrapped(
-            "The relay URL your friends connect through. " +
-            "Use wss:// for a Cloudflare Tunnel, ws:// for local/Tailscale.");
     }
 
     // --- Hosting (identity-based) ---
 
-    public void GoLive(string uid, string name, string playerId)
+    public void GoLive(string uid, string name, string playerId, WorldScreenState? initialScreen)
     {
         var backend = getBackend();
         if (backend is not { IsGameLoaded: true })
@@ -93,13 +68,24 @@ public sealed class StreamPanel : IDisposable
         host?.Dispose();
         host = new StreamHost(backend, relayUrl, log);
         host.StateChanged += () => { };
-        _ = Task.Run(() => host.GoLiveAsync(uid, name, playerId));
+        _ = Task.Run(() => host.GoLiveAsync(uid, name, playerId, initialScreen));
     }
 
     public void StopLive()
     {
         if (host is { IsLive: true })
             _ = Task.Run(() => host.StopLiveAsync());
+    }
+
+    public void PublishScreenState(WorldScreenState? state) => host?.PublishScreenState(state);
+
+    // Audio follows the newest watched stream, but its level is always the
+    // same master level as the local emulator.
+    public void SetVolume(float value)
+    {
+        volume = Math.Clamp(value, 0f, 1f);
+        foreach (var viewer in viewers.Values)
+            viewer.Client.SetVolume(volume);
     }
 
     // End the whole session: stop hosting and drop every watched stream
@@ -139,6 +125,7 @@ public sealed class StreamPanel : IDisposable
             v.Client.SetAudioEnabled(false);
 
         var client = new StreamClient(relayUrl, log);
+        client.SetVolume(volume);
         var viewer = new Viewer { Client = client };
         viewers[key] = viewer;
 

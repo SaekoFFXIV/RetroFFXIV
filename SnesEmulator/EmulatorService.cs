@@ -14,6 +14,7 @@ using System.Runtime.InteropServices;
 using SnesEmulator.Emulation;
 using SnesEmulator.Streaming;
 using EmulatorStream;
+using FfxivCameraManager = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CameraManager;
 
 namespace SnesEmulator;
 
@@ -28,26 +29,33 @@ public sealed class EmulatorService : IDisposable
     private const float Bezel = 26f;
     private const float ControlStrip = 48f;
     private const float PanelGap = 10f;
-    private const float PanelWidth = 360f;
-    private const int PanelThemeColorCount = 23;
+    private const float PanelWidth = 400f;
+    private const float DeckContentInsetX = 8f;
+    private const float DeckContentInsetTop = 10f;
+    private const float DeckContentInsetBottom = 18f;
+    private const float TextContentInset = 12f;
+    private const int PanelThemeColorCount = 26;
+    private const int PanelThemeStyleVarCount = 6;
 
     private const uint Black = 0xFF000000;
 
-    // Solution Nine palette — translucent shiny black body, electric neon accents.
-    private const uint ShellBody = 0xA6080808;       // ~65% opaque black
-    private const uint ShellHighlight = 0x80141414;  // ~50% lifted black
-    private const uint Sheen = 0x602A2A2A;           // subtle sheen
-    private const uint GlossEdge = 0xA01A1A1A;       // dark edge
-    private const uint GlossFill = 0xA6040404;       // near-black
-    private const uint NeonCyan = 0xFFFFE500;        // #00E5FF — electric cyan
-    private const uint NeonPink = 0xFF8040FF;        // #FF4080 — hot magenta-pink
-    private const uint NeonAmber = 0xFF30B8FF;       // #FFB830 — warm amber-gold
-    private const uint NeonViolet = 0xFFFF40AA;      // #AA40FF — violet-purple
-    private const uint DeckBody = 0xA6060606;        // translucent shiny black panel
-    private const uint TextDim = 0xFF9A8AAA;         // cool lavender-gray
-    private const uint TextBright = 0xFFE0D8F0;      // ice-silver
-    private const uint LedOn = 0xFFFFE500;           // cyan when on
-    private const uint LedOff = 0xFF8040FF;          // dim pink when off
+    // Restrained graphite palette: one cool accent, clear hierarchy, and
+    // enough opacity that gameplay never competes with the controls.
+    private const uint ShellBody = 0xF01B1D20;
+    private const uint ShellHighlight = 0xFF30343B;
+    private const uint Sheen = 0x302A2E32;
+    private const uint GlossEdge = 0xFF3A414A;
+    private const uint GlossFill = 0xFF13161A;
+    private const uint NeonCyan = 0xFFEBC65D;         // #5DC6EB — primary accent
+    private const uint NeonPink = 0xFF6060D0;         // #D06060 — destructive accent
+    private const uint NeonAmber = 0xFFE0B46E;        // #6EB4E0 — secondary accent
+    private const uint NeonViolet = 0xFFC0B4A8;       // #A8B4C0 — neutral indicator
+    private const uint DeckBody = 0xFF1A1C20;
+    private const uint TextDim = 0xFF9AA3AC;
+    private const uint TextBright = 0xFFE8EDF2;
+    private const uint LedOn = 0xFFEBC65D;
+    private const uint LedOff = 0xFF6060D0;
+    private const float BindingColumnX = 126f;
 
     private static readonly SnesButton[] ButtonOrder =
     {
@@ -61,6 +69,8 @@ public sealed class EmulatorService : IDisposable
         SnesButton.A, SnesButton.B, SnesButton.X, SnesButton.Y,
         SnesButton.L, SnesButton.R, SnesButton.Start, SnesButton.Select,
     };
+
+    private static readonly string[] DeckTabLabels = { "ROM", "Controls", "Settings", "Sync", "Friends" };
 
     private static readonly ushort[] XInputButtonFlags =
     {
@@ -91,6 +101,7 @@ public sealed class EmulatorService : IDisposable
     // One world screen per watched stream, keyed by player ID.
     private readonly System.Collections.Generic.Dictionary<string, WorldScreenRenderer> watchScreens = new();
     private readonly System.Collections.Generic.Dictionary<string, long> watchVersions = new();
+    private readonly System.Collections.Generic.Dictionary<string, long> watchScreenStateVersions = new();
 
     // Live presence for synced friends (polled via sync_check).
     private readonly System.Collections.Generic.Dictionary<string, LivePlayerInfo> liveStatus = new();
@@ -112,6 +123,8 @@ public sealed class EmulatorService : IDisposable
     private long dxLocalVersion = -1;
     private byte[]? dxLocalFrame;
     private int dxLocalW, dxLocalH;
+    private bool loggedDxCameraMatrices;
+    private DateTime lastDxProjectionComparison = DateTime.MinValue;
     private readonly System.Collections.Generic.Dictionary<string, long> dxWatchVersions = new();
     private readonly System.Collections.Generic.Dictionary<string, (byte[] Rgba, int W, int H)> dxWatchFrames = new();
 
@@ -126,6 +139,7 @@ public sealed class EmulatorService : IDisposable
 
     private bool panelOpen = true;
     private bool screenOn;
+    private int selectedDeckTab;
 
     // CRT power animation: 0 = off, 1 = fully on, in-between = animating.
     private float crtAnim;          // current animation progress [0..1]
@@ -172,13 +186,15 @@ public sealed class EmulatorService : IDisposable
         {
             if (xivAuth.IsLoggedIn)
                 TryRegisterPlayerId(auto: true);
+            else
+                netplayPanel?.StopForAuthLoss();
         };
         streamConfig = config.GetStreamConfig();
         streamPanel = new StreamPanel(
             streamConfig, textureProvider,
             msg => log.Information("[Stream] {Msg}", msg),
-            () => core,
-            () => pluginInterface.SavePluginConfig(config));
+            () => core);
+        streamPanel.SetVolume(config.Volume);
         presence = new RelayPresence(msg => log.Information("[Presence] {Msg}", msg));
         dxScreen = new Rendering.DxWorldRenderer(interop, log);
         netplayPanel = new NetplayPanel(
@@ -193,8 +209,9 @@ public sealed class EmulatorService : IDisposable
             config.ScreenPosition,
             pos =>
             {
-                config.ScreenPosition = pos.Length == 3 ? pos : null;
+                config.ScreenPosition = pos.Length is 3 or 6 ? pos : null;
                 SaveConfig();
+                PublishLocalScreenState();
             });
 
         framework.Update += OnFrameworkUpdate;
@@ -202,6 +219,27 @@ public sealed class EmulatorService : IDisposable
 
     private Vector3? GetPlayerPos() => objectTable.LocalPlayer?.Position;
     private float GetPlayerRot() => objectTable.LocalPlayer?.Rotation ?? 0f;
+
+    private WorldScreenState? CreateLocalScreenState()
+    {
+        if (worldScreen is not { IsPlaced: true })
+            return null;
+
+        // Legacy placements may not have a stored normal until their first
+        // render. Resolve it before publishing so every viewer gets a fixed
+        // surface orientation rather than a camera-facing billboard.
+        var cameraPosition = GetPlayerPos() ?? worldScreen.ScreenPosition + Vector3.UnitZ;
+        worldScreen.GetQuadBasis(cameraPosition, out _, out _);
+
+        var position = worldScreen.ScreenPosition;
+        var normal = worldScreen.SurfaceNormal;
+        var saved = normal is { } n
+            ? new[] { position.X, position.Y, position.Z, n.X, n.Y, n.Z }
+            : new[] { position.X, position.Y, position.Z };
+        return new WorldScreenState { Position = saved, Width = config.ScreenWidth };
+    }
+
+    private void PublishLocalScreenState() => streamPanel?.PublishScreenState(CreateLocalScreenState());
 
     private System.Collections.Generic.List<Vector3> GetNearbyPlayerPositions()
     {
@@ -311,31 +349,18 @@ public sealed class EmulatorService : IDisposable
             var origin = ImGui.GetWindowPos();
             var drawList = ImGui.GetWindowDrawList();
 
-            // Solution Nine shell — warm charcoal with neon trim.
+            // One clean graphite shell, with a single restrained accent.
             var shellMin = origin;
             var shellMax = origin + new Vector2(windowW, windowH);
             drawList.AddRectFilled(shellMin, shellMax, ShellBody, 12f);
-            drawList.AddRectFilled(shellMin, new Vector2(shellMax.X, shellMin.Y + 16), ShellHighlight, 12f);
-            drawList.AddRectFilled(shellMin, new Vector2(shellMax.X, shellMin.Y + 8), ShellBody, 12f);
-            drawList.AddRect(shellMin + new Vector2(1, 1), shellMax - new Vector2(1, 1), ShellHighlight, 11f, 0, 1f);
+            drawList.AddRectFilled(shellMin, new Vector2(shellMax.X, shellMin.Y + 12), ShellHighlight, 12f);
+            drawList.AddRectFilled(shellMin, new Vector2(shellMax.X, shellMin.Y + 6), ShellBody, 12f);
+            drawList.AddRect(shellMin + new Vector2(1, 1), shellMax - new Vector2(1, 1), GlossEdge, 11f, 0, 1f);
+            drawList.AddRect(shellMin, shellMax, 0xB0EBC65D, 12f, 0, 1f);
 
-            // Neon turquoise outline — the signature Solution Nine glow.
-            drawList.AddRect(shellMin, shellMax, NeonCyan, 12f, 0, 2f);
-
-            // Corner accent stripes (coral + yellow), like street signage.
-            const float stripe = 5f;
-            drawList.AddLine(
-                new Vector2(shellMin.X + 14, shellMin.Y + 2),
-                new Vector2(shellMin.X + 14 + 40, shellMin.Y + 2),
-                NeonPink, stripe);
-            drawList.AddLine(
-                new Vector2(shellMin.X + 60, shellMin.Y + 2),
-                new Vector2(shellMin.X + 60 + 24, shellMin.Y + 2),
-                NeonAmber, stripe);
-
-            // Close button (top-right bezel) — magenta neon.
-            var btnSize = new Vector2(18, 18);
-            var btnPos = origin + new Vector2(windowW - Bezel - btnSize.X, (Bezel - btnSize.Y) / 2f);
+            // Keep close at the true top-right rather than inside the bezel.
+            var btnSize = new Vector2(16, 16);
+            var btnPos = origin + new Vector2(windowW - btnSize.X - 7f, 5f);
             ImGui.SetCursorScreenPos(btnPos);
             if (ImGui.InvisibleButton("##close", btnSize))
             {
@@ -344,10 +369,10 @@ public sealed class EmulatorService : IDisposable
 
             var btnHovered = ImGui.IsItemHovered();
             var btnCenter = btnPos + btnSize / 2;
-            var x = 4f;
-            var xColor = btnHovered ? NeonViolet : NeonPink;
-            drawList.AddLine(btnCenter - new Vector2(x, x), btnCenter + new Vector2(x, x), xColor, 2f);
-            drawList.AddLine(btnCenter + new Vector2(x, -x), btnCenter + new Vector2(-x, x), xColor, 2f);
+            var x = 3.5f;
+            var xColor = btnHovered ? NeonPink : TextDim;
+            drawList.AddLine(btnCenter - new Vector2(x, x), btnCenter + new Vector2(x, x), xColor, 1.5f);
+            drawList.AddLine(btnCenter + new Vector2(x, -x), btnCenter + new Vector2(-x, x), xColor, 1.5f);
 
             // Advance CRT power animation.
             var dt = ImGui.GetIO().DeltaTime;
@@ -568,107 +593,185 @@ public sealed class EmulatorService : IDisposable
         var panelW = panelMax.X - panelMin.X;
         var panelH = panelMax.Y - panelMin.Y;
 
-        // Recessed piano-black deck.
+        // Opaque utility deck: readable at a glance over any in-game scene.
         drawList.AddRectFilled(panelMin, panelMax, DeckBody, 8f);
-        drawList.AddRect(panelMin + new Vector2(1, 1), panelMax - new Vector2(1, 1), ShellHighlight, 7f, 0, 1f);
-        drawList.AddRect(panelMin, panelMax, Black, 8f, 0, 2f);
+        drawList.AddRect(panelMin + new Vector2(1, 1), panelMax - new Vector2(1, 1), GlossEdge, 7f, 0, 1f);
+        drawList.AddLine(panelMin + new Vector2(10f, 1f), panelMax - new Vector2(10f, panelH - 1f), 0x80EBC65D, 1f);
 
-        ImGui.SetCursorScreenPos(panelMin + new Vector2(6, 6));
+        var contentMin = panelMin + new Vector2(DeckContentInsetX, DeckContentInsetTop);
+        var contentMax = panelMax - new Vector2(DeckContentInsetX, DeckContentInsetBottom);
+        drawList.AddRect(contentMin, contentMax, 0x6046515C, 6f, 0, 1f);
+
+        ImGui.SetCursorScreenPos(contentMin);
         PushPanelTheme();
-        ImGui.BeginChild("##sidepanel", new Vector2(panelW - 12, panelH - 12), false);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(TextContentInset, 4f));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(8f, 8f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(14f, 5f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.GrabRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.TabRounding, 4f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+        ImGui.BeginChild(
+            "##sidepanel", contentMax - contentMin,
+            false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        ImGui.PopStyleVar();
 
-        if (ImGui.BeginTabBar("##retro-tabs"))
+        DrawDeckTabs();
+
+        switch (selectedDeckTab)
         {
-            if (ImGui.BeginTabItem("ROM"))
-            {
+            case 0:
+                BeginTabContent("##rom_tab_content");
                 DrawRomTab();
-                ImGui.EndTabItem();
-            }
+                EndTabContent();
+                break;
 
-            if (ImGui.BeginTabItem("Controls"))
-            {
-                ImGui.TextUnformatted("Keyboard");
+            case 1:
+                BeginTabContent("##controls_tab_content");
+                DrawInsetTextColored(new Vector4(0.36f, 0.78f, 0.92f, 1f), "Input bindings");
+                DrawInsetTextDisabled("Select a field to rebind. Right-click restores its default.");
+                ImGui.Spacing();
+                DrawSectionHeading("Keyboard", "12 inputs");
                 DrawKeyboardTab();
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Spacing();
-                ImGui.TextUnformatted("Controller");
+                DrawSectionHeading("Controller", "8 inputs");
                 DrawControllerTab();
-                ImGui.EndTabItem();
-            }
+                EndTabContent();
+                break;
 
-            if (ImGui.BeginTabItem("Settings"))
-            {
+            case 2:
+                BeginTabContent("##settings_tab_content");
                 DrawSettingsTab();
-                ImGui.EndTabItem();
-            }
+                EndTabContent();
+                break;
 
-            if (ImGui.BeginTabItem("Sync"))
-            {
-                DrawIdentitySection();
-                ImGui.Spacing();
-                ImGui.Separator();
-                ImGui.Spacing();
+            case 3:
+                BeginTabContent("##sync_tab_content");
                 DrawSyncSection();
-                ImGui.Spacing();
-                ImGui.Separator();
-                ImGui.Spacing();
-                streamPanel?.DrawTab();
-                ImGui.Spacing();
-                ImGui.Separator();
-                ImGui.Spacing();
-                DrawWorldScreenSection();
-                ImGui.EndTabItem();
-            }
+                EndTabContent();
+                break;
 
-            if (ImGui.BeginTabItem("Netplay"))
-            {
-                netplayPanel?.DrawTab();
-                ImGui.EndTabItem();
-            }
-
-            ImGui.EndTabBar();
+            case 4:
+                BeginTabContent("##friends_tab_content");
+                DrawFriendsTab();
+                EndTabContent();
+                break;
         }
 
         ImGui.EndChild();
+        ImGui.PopStyleVar(PanelThemeStyleVarCount);
         ImGui.PopStyleColor(PanelThemeColorCount);
+    }
+
+    private void DrawDeckTabs()
+    {
+        const float tabGap = 3f;
+        var available = ImGui.GetContentRegionAvail().X;
+        var tabWidth = Math.Max(1f,
+            (available - tabGap * (DeckTabLabels.Length - 1)) / DeckTabLabels.Length);
+
+        // These are navigation segments, not form fields: compact padding
+        // preserves all labels while the equal widths fill the full deck.
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 5f));
+        for (var i = 0; i < DeckTabLabels.Length; i++)
+        {
+            if (i > 0)
+                ImGui.SameLine(0f, tabGap);
+
+            var active = selectedDeckTab == i;
+            if (active)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Button, 0xFF35424E);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0xFF40505E);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, NeonCyan);
+            }
+
+            if (ImGui.Button($"{DeckTabLabels[i]}##deck_tab_{i}", new Vector2(tabWidth, 0f)))
+                selectedDeckTab = i;
+
+            if (active)
+                ImGui.PopStyleColor(3);
+        }
+        ImGui.PopStyleVar();
+        ImGui.Separator();
+    }
+
+    private static void BeginTabContent(string id)
+    {
+        ImGui.BeginChild(id, Vector2.Zero, false, ImGuiWindowFlags.AlwaysUseWindowPadding);
+    }
+
+    private static void EndTabContent()
+    {
+        // Preserve a visible gutter after the last control when a tab scrolls
+        // to the end, instead of stopping directly on the child border.
+        ImGui.Dummy(new Vector2(0f, 12f));
+        ImGui.EndChild();
+    }
+
+    // The tab content owns its shared margin, so text and fields stay on the
+    // same vertical edge instead of relying on per-widget offsets.
+    private static void DrawInsetText(string text)
+    {
+        ImGui.TextUnformatted(text);
+    }
+
+    private static void DrawInsetTextDisabled(string text)
+    {
+        ImGui.TextDisabled(text);
+    }
+
+    private static void DrawInsetTextColored(Vector4 color, string text)
+    {
+        ImGui.TextColored(color, text);
+    }
+
+    private static void DrawInsetTextWrapped(string text)
+    {
+        ImGui.TextWrapped(text);
     }
 
     private static void PushPanelTheme()
     {
-        // Translucent shiny black surfaces with neon Solution Nine accents.
+        // Consistent dark application surfaces: controls read as fields and
+        // actions, while the accent is reserved for state and focus.
         ImGui.PushStyleColor(ImGuiCol.ChildBg, 0x00000000);
-        ImGui.PushStyleColor(ImGuiCol.FrameBg, 0x80080808);
-        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, 0xA0141414);
-        ImGui.PushStyleColor(ImGuiCol.FrameBgActive, 0xA01E1E1E);
-        ImGui.PushStyleColor(ImGuiCol.Button, 0x800C0C0C);
-        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0xA01A1A1A);
-        ImGui.PushStyleColor(ImGuiCol.ButtonActive, 0xA0242424);
-        ImGui.PushStyleColor(ImGuiCol.Header, 0x800C0C0C);
-        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, 0xA01A1A1A);
-        ImGui.PushStyleColor(ImGuiCol.HeaderActive, 0xA0242424);
-        ImGui.PushStyleColor(ImGuiCol.Text, 0xFFE0D8F0);
-        ImGui.PushStyleColor(ImGuiCol.TextDisabled, 0xFF7A6A8A);
-        ImGui.PushStyleColor(ImGuiCol.Separator, 0x601A1A1A);
-        ImGui.PushStyleColor(ImGuiCol.Tab, 0x80080808);
-        ImGui.PushStyleColor(ImGuiCol.TabHovered, 0xA01A1A1A);
-        ImGui.PushStyleColor(ImGuiCol.TabActive, 0xA0141414);
-        ImGui.PushStyleColor(ImGuiCol.ScrollbarBg, 0x40060606);
-        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab, 0x801A1A1A);
-        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0xA0242424);
-        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabActive, 0xA02E2E2E);
-        ImGui.PushStyleColor(ImGuiCol.CheckMark, 0xFFFFE500);   // cyan
-        ImGui.PushStyleColor(ImGuiCol.SliderGrab, 0xFFFFE500);   // cyan
-        ImGui.PushStyleColor(ImGuiCol.SliderGrabActive, 0xFF8040FF); // pink
+        ImGui.PushStyleColor(ImGuiCol.FrameBg, 0xFF23272E);
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, 0xFF2B3139);
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive, 0xFF35424E);
+        ImGui.PushStyleColor(ImGuiCol.Button, 0xFF20252C);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0xFF2B333C);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, 0xFF35424E);
+        ImGui.PushStyleColor(ImGuiCol.Header, 0xFF20252C);
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, 0xFF2B333C);
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive, 0xFF35424E);
+        ImGui.PushStyleColor(ImGuiCol.Text, TextBright);
+        ImGui.PushStyleColor(ImGuiCol.TextDisabled, TextDim);
+        ImGui.PushStyleColor(ImGuiCol.Separator, 0xFF39414B);
+        ImGui.PushStyleColor(ImGuiCol.Tab, 0xFF171B20);
+        ImGui.PushStyleColor(ImGuiCol.TabHovered, 0xFF27313A);
+        ImGui.PushStyleColor(ImGuiCol.TabActive, 0xFF35424E);
+        ImGui.PushStyleColor(ImGuiCol.ScrollbarBg, 0xFF121519);
+        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab, 0xFF3A444F);
+        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0xFF4A5A68);
+        ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabActive, NeonCyan);
+        ImGui.PushStyleColor(ImGuiCol.CheckMark, NeonCyan);
+        ImGui.PushStyleColor(ImGuiCol.SliderGrab, NeonCyan);
+        ImGui.PushStyleColor(ImGuiCol.SliderGrabActive, 0xFFFFD47A);
+        ImGui.PushStyleColor(ImGuiCol.Border, 0xFF46515C);
+        ImGui.PushStyleColor(ImGuiCol.TextSelectedBg, 0x804E9AC0);
+        ImGui.PushStyleColor(ImGuiCol.NavHighlight, NeonCyan);
     }
 
     private void DrawCoreSelector()
     {
-        ImGui.TextUnformatted("Core");
+        DrawInsetText("Core");
 
         if (coreManager.Cores.Count == 0)
         {
-            ImGui.TextWrapped(coreManager.ScanError);
+            DrawInsetTextWrapped(coreManager.ScanError);
             if (ImGui.Button("Rescan cores"))
             {
                 coreManager.Scan();
@@ -697,7 +800,7 @@ public sealed class EmulatorService : IDisposable
 
         if (selectedCore is { Extensions.Length: > 0 })
         {
-            ImGui.TextDisabled($"Supports: {string.Join(" ", selectedCore.Extensions)}");
+            DrawInsetTextDisabled($"Supports: {string.Join(" ", selectedCore.Extensions)}");
         }
 
         ImGui.SameLine();
@@ -915,8 +1018,7 @@ public sealed class EmulatorService : IDisposable
 
     private void DrawKeyboardTab()
     {
-        ImGui.TextWrapped("Click a binding to rebind, right-click to reset.");
-        ImGui.Separator();
+        DrawBindingColumnHeader();
         HandleKeyRebinding();
 
         foreach (var button in ButtonOrder)
@@ -924,8 +1026,9 @@ public sealed class EmulatorService : IDisposable
             var name = button.ToString();
             config.KeyBindings.TryGetValue(name, out var vk);
 
+            ImGui.AlignTextToFramePadding();
             ImGui.TextUnformatted(name);
-            ImGui.SameLine(120);
+            ImGui.SameLine(BindingColumnX);
 
             var label = rebindingKey == button ? "Press a key..." : KeyName(vk);
             if (ImGui.Button($"{label}##kb{name}", new Vector2(-1, 0)))
@@ -949,16 +1052,7 @@ public sealed class EmulatorService : IDisposable
 
     private void DrawControllerTab()
     {
-        // Diagnostics — shows what the gamepad reader sees.
-        var gp = inputManager.Gamepad;
-        ImGui.TextUnformatted($"Controller connected: {gp.Connected}");
-        ImGui.TextUnformatted($"Buttons: 0x{gp.Buttons:X4}  Stick: {gp.LeftStickX:F2}, {gp.LeftStickY:F2}");
-        ImGui.TextUnformatted($"Input mode: {config.InputMode}");
-        ImGui.TextWrapped($"Debug: {gp.DebugInfo}");
-        ImGui.Separator();
-
-        ImGui.TextWrapped("D-Pad is on the left stick. Click a button, then press a controller button to rebind. Right-click to reset.");
-        ImGui.Separator();
+        DrawBindingColumnHeader();
         HandleControllerRebinding();
 
         foreach (var button in ControllerButtonOrder)
@@ -966,8 +1060,9 @@ public sealed class EmulatorService : IDisposable
             var name = button.ToString();
             config.ControllerBindings.TryGetValue(name, out var flag);
 
+            ImGui.AlignTextToFramePadding();
             ImGui.TextUnformatted(name);
-            ImGui.SameLine(120);
+            ImGui.SameLine(BindingColumnX);
 
             var label = rebindingController == button ? "Press button..." : XInputButtonName(flag);
             if (ImGui.Button($"{label}##cb{name}", new Vector2(-1, 0)))
@@ -991,18 +1086,38 @@ public sealed class EmulatorService : IDisposable
         }
     }
 
+    private static void DrawBindingColumnHeader()
+    {
+        ImGui.TextDisabled("CONTROL");
+        ImGui.SameLine(BindingColumnX);
+        ImGui.TextDisabled("ASSIGNED INPUT");
+        ImGui.Separator();
+    }
+
+    private static void DrawSectionHeading(string title, string detail)
+    {
+        ImGui.TextColored(new Vector4(0.72f, 0.78f, 0.84f, 1f), title);
+        ImGui.SameLine();
+        ImGui.TextDisabled(detail);
+    }
+
     private void DrawSettingsTab()
     {
-        ImGui.TextUnformatted("Options");
+        DrawInsetText("Options");
 
         var volume = (int)Math.Round(config.Volume * 100f);
-        if (ImGui.SliderInt("Volume %", ref volume, 0, 100))
+        if (ImGui.SliderInt("Master volume", ref volume, 0, 100))
         {
             SetVolume(volume / 100f);
             SaveConfig();
         }
+        DrawInsetTextDisabled("Applies to emulator and remote stream audio.");
 
-        if (ImGui.BeginCombo("Resolution scale", $"{config.ResolutionScale}x"))
+        const string resolutionLabel = "Resolution scale";
+        var resolutionWidth = Math.Max(140f,
+            ImGui.GetContentRegionAvail().X - ImGui.CalcTextSize(resolutionLabel).X - 12f);
+        ImGui.SetNextItemWidth(resolutionWidth);
+        if (ImGui.BeginCombo(resolutionLabel, $"{config.ResolutionScale}x"))
         {
             for (var i = 1; i <= MaxScale; i++)
             {
@@ -1024,7 +1139,7 @@ public sealed class EmulatorService : IDisposable
         }
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("Input");
+        DrawInsetText("Input");
         ImGui.SetNextItemWidth(-1);
         var modeNames = new[] { "Both", "Keyboard only", "Controller only" };
         var currentMode = (int)config.InputMode;
@@ -1035,7 +1150,29 @@ public sealed class EmulatorService : IDisposable
         }
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("CRT effects");
+        DrawInsetText("World screen");
+
+        var width = config.ScreenWidth;
+        if (ImGui.SliderFloat("Screen width", ref width, 0.5f, 20f, "%.1f yalms"))
+        {
+            config.ScreenWidth = width;
+            streamConfig.ScreenWidth = width;
+            SaveConfig();
+            PublishLocalScreenState();
+        }
+
+        var dxWorldScreen = config.UseDxWorldScreen;
+        if (ImGui.Checkbox("Use depth occlusion", ref dxWorldScreen))
+        {
+            config.UseDxWorldScreen = dxWorldScreen;
+            SaveConfig();
+        }
+        if (dxScreen is { Failed: true })
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f),
+                "Depth rendering could not initialise; using the overlay instead.");
+
+        ImGui.Spacing();
+        DrawInsetText("CRT effects");
 
         var scanlines = config.Scanlines;
         if (ImGui.Checkbox("Scanlines", ref scanlines))
@@ -1211,6 +1348,8 @@ public sealed class EmulatorService : IDisposable
                 SystemDirectory = systemDir,
                 SaveDirectory = saveDir,
                 InputState = inputManager.GetInputState,
+                BackgroundError = ex => log.Error(ex,
+                    "Emulator thread stopped after a contained core failure"),
             };
             newCore.Load(path);
             core = newCore;
@@ -1345,8 +1484,10 @@ public sealed class EmulatorService : IDisposable
 
     public void SetVolume(float volume)
     {
-        config.Volume = volume;
-        audio?.SetVolume(volume);
+        var clamped = Math.Clamp(volume, 0f, 1f);
+        config.Volume = clamped;
+        audio?.SetVolume(clamped);
+        streamPanel?.SetVolume(clamped);
     }
 
     private void SaveConfig() => pluginInterface.SavePluginConfig(config);
@@ -1407,47 +1548,34 @@ public sealed class EmulatorService : IDisposable
     private string syncIdInput = string.Empty;
     private string syncNameInput = string.Empty;
 
-    // PlayerSync-style card at the top of the Sync tab: the registered
-    // player ID in neon, click anywhere on the card to copy it.
-    private void DrawPlayerIdCard(bool registered)
+    // Kept directly above the roster so adding a friend starts with the
+    // one piece of information the other player needs.
+    private void DrawShareablePlayerId()
     {
-        const float cardH = 64f;
-        const uint DimText = 0xFF7A6A8A;
+        var uid = xivAuth.GetPlayerUid();
+        var registered = xivAuth.IsLoggedIn
+            && !string.IsNullOrEmpty(config.PlayerId)
+            && config.PlayerIdUid == uid;
 
-        var availW = ImGui.GetContentRegionAvail().X;
-        var p = ImGui.GetCursorScreenPos();
-        var dl = ImGui.GetWindowDrawList();
-
-        dl.AddRectFilled(p, p + new Vector2(availW, cardH), DeckBody, 6f);
-        dl.AddRect(p + new Vector2(1, 1), p + new Vector2(availW - 1, cardH - 1), ShellHighlight, 5f);
-
+        ImGui.TextUnformatted("Your player ID");
         if (registered)
         {
             var copied = DateTime.UtcNow < idCopiedUntil;
-            CenteredText(dl, p + new Vector2(0, 9), availW, 14,
-                copied ? "Copied to clipboard!" : "PLAYER ID", copied ? NeonCyan : DimText);
-            CenteredText(dl, p + new Vector2(0, 27), availW, 24, config.PlayerId, NeonCyan);
-
-            ImGui.SetCursorScreenPos(p);
-            if (ImGui.InvisibleButton("##idcopy", new Vector2(availW, cardH)))
+            ImGui.SameLine();
+            if (ImGui.Button($"{(copied ? "Copied" : config.PlayerId)}##copy_player_id", new Vector2(-1, 0)))
             {
                 ImGui.SetClipboardText(config.PlayerId);
                 idCopiedUntil = DateTime.UtcNow.AddSeconds(1.5);
             }
-        }
-        else if (!xivAuth.IsLoggedIn)
-        {
-            CenteredText(dl, p + new Vector2(0, 14), availW, 14, "PLAYER ID", DimText);
-            CenteredText(dl, p + new Vector2(0, 34), availW, 14, "Log in with XIVAuth to get yours", DimText);
+
+            DrawInsetTextDisabled(copied ? "Copied to clipboard." : "Click to copy and share it with friends.");
         }
         else
         {
-            CenteredText(dl, p + new Vector2(0, 14), availW, 14, "PLAYER ID", DimText);
-            CenteredText(dl, p + new Vector2(0, 34), availW, 14,
-                playerRegistering ? "Registering with the relay..." : "Not registered yet", DimText);
+            DrawInsetTextDisabled(!xivAuth.IsLoggedIn
+                ? "Sign in with XIVAuth to get a shareable ID."
+                : playerRegistering ? "Preparing your player ID..." : "Your player ID is not ready yet.");
         }
-
-        ImGui.Dummy(new Vector2(availW, cardH));
     }
 
     // Who is online right now (relay presence), with LIVE badges and a
@@ -1519,7 +1647,267 @@ public sealed class EmulatorService : IDisposable
             streamPanel?.StopWatching(stopKey);
     }
 
+    private string syncFilter = string.Empty;
+
     private void DrawSyncSection()
+    {
+        var uid = xivAuth.GetPlayerUid();
+        var registered = xivAuth.IsLoggedIn
+            && !string.IsNullOrEmpty(config.PlayerId)
+            && config.PlayerIdUid == uid;
+
+        // Watching friends works without a login. A local account is only
+        // required when the player wants to publish a stream.
+        if (!registered && xivAuth.IsLoggedIn)
+            TryRegisterPlayerId(auto: true);
+
+        DrawStreamingControls(registered, uid);
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        DrawWorldScreenSection();
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        DrawNetplaySection();
+    }
+
+    private void DrawFriendsTab()
+    {
+        PollSyncStatus();
+        DrawShareablePlayerId();
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+        DrawFriendRoster();
+    }
+
+    private void DrawNetplaySection()
+    {
+        DrawInsetText("Netplay");
+        if (!xivAuth.IsLoggedIn)
+        {
+            DrawInsetTextDisabled("Sign in with XIVAuth to host or join netplay.");
+            return;
+        }
+
+        netplayPanel?.DrawTab();
+    }
+
+    private void DrawStreamingControls(bool registered, string uid)
+    {
+        DrawInsetText("Streaming");
+
+        var showLocalScreen = config.ShowLocalWorldScreen;
+        if (ImGui.Checkbox("Show local screen in world", ref showLocalScreen))
+        {
+            config.ShowLocalWorldScreen = showLocalScreen;
+            SaveConfig();
+        }
+        if (!showLocalScreen)
+            DrawInsetTextDisabled("Local screen is hidden. Placement is still available below.");
+
+        if (streamPanel is { IsLive: true })
+        {
+            ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), "LIVE");
+            ImGui.SameLine();
+            ImGui.TextDisabled("Your stream is available to synced friends.");
+            if (ImGui.Button("Stop stream", new Vector2(-1, 0)))
+                streamPanel.StopLive();
+            return;
+        }
+
+        if (registered && core is { IsGameLoaded: true })
+        {
+            if (ImGui.Button("Start stream", new Vector2(-1, 0)))
+                streamPanel?.GoLive(uid, config.PlayerCharacterName, config.PlayerId, CreateLocalScreenState());
+            return;
+        }
+
+        if (!xivAuth.IsLoggedIn)
+        {
+            DrawInsetTextDisabled("Sign in only when you want to share a stream.");
+            if (ImGui.Button("Sign in to stream", new Vector2(-1, 0)))
+                _ = System.Threading.Tasks.Task.Run(xivAuth.StartLoginAsync);
+            return;
+        }
+
+        if (xivAuth.IsPolling)
+        {
+            DrawInsetTextDisabled("Finish sign-in in your browser, then return here.");
+            if (ImGui.Button("Open sign-in page", new Vector2(-1, 0)))
+                Dalamud.Utility.Util.OpenLink(xivAuth.LoginUrl);
+            return;
+        }
+
+        if (playerRegistering)
+        {
+            DrawInsetTextDisabled("Preparing streaming access...");
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(playerRegError))
+        {
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f),
+                "Streaming setup needs another try.");
+            if (ImGui.Button("Retry setup", new Vector2(-1, 0)))
+                TryRegisterPlayerId(auto: false);
+            return;
+        }
+
+        DrawInsetTextDisabled("Load a game to start streaming.");
+    }
+
+    private void DrawFriendRoster()
+    {
+        System.Collections.Generic.Dictionary<string, LivePlayerInfo> liveSnapshot;
+        lock (liveStatus)
+            liveSnapshot = new System.Collections.Generic.Dictionary<string, LivePlayerInfo>(liveStatus);
+
+        var friends = config.SyncFriends
+            .Select((friend, index) =>
+            {
+                var key = StreamPanel.NormalizeId(friend.Key);
+                liveSnapshot.TryGetValue(key, out var live);
+                var label = !string.IsNullOrWhiteSpace(friend.Name) ? friend.Name
+                    : !string.IsNullOrWhiteSpace(live?.Name) ? live!.Name : key;
+                return new { Friend = friend, Index = index, Key = key, Live = live, Label = label };
+            })
+            .Where(friend => string.IsNullOrWhiteSpace(syncFilter)
+                || friend.Label.Contains(syncFilter, StringComparison.OrdinalIgnoreCase)
+                || friend.Key.Contains(syncFilter, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(friend => friend.Live != null)
+            .ThenBy(friend => friend.Label, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var liveCount = liveSnapshot.Count;
+        ImGui.TextUnformatted("Friends");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{config.SyncFriends.Count} synced | {liveCount} live | "
+            + $"{streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} streams active");
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##syncfilter", "Search friends", ref syncFilter, 128);
+
+        string? watchKey = null;
+        string? stopKey = null;
+        int? removeIndex = null;
+
+        var listHeight = Math.Min(260f, Math.Max(94f, friends.Count * 46f + 8f));
+        ImGui.BeginChild("##synced_friends", new Vector2(0, listHeight), true);
+        if (friends.Count == 0)
+        {
+            DrawInsetTextDisabled(config.SyncFriends.Count == 0
+                ? "No friends synced yet. Add a player ID below."
+                : "No synced friends match your search.");
+        }
+
+        foreach (var friend in friends)
+        {
+            var watching = streamPanel?.IsWatching(friend.Key) == true;
+            var streamEnabled = watching;
+            var canStart = friend.Live != null || watching;
+
+            ImGui.PushID($"friend_{friend.Index}");
+            if (!canStart)
+                ImGui.BeginDisabled();
+            if (ImGui.Checkbox("##stream_enabled", ref streamEnabled))
+            {
+                if (streamEnabled)
+                    watchKey = friend.Key;
+                else
+                    stopKey = friend.Key;
+            }
+            if (!canStart)
+                ImGui.EndDisabled();
+            if (!canStart && ImGui.IsItemHovered())
+                ImGui.SetTooltip("This friend is not streaming right now.");
+
+            ImGui.SameLine();
+            ImGui.TextUnformatted(friend.Label);
+            ImGui.SameLine();
+            if (friend.Live != null)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), "LIVE");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"{friend.Live.Viewers} watching");
+            }
+            else
+            {
+                ImGui.TextDisabled("offline");
+            }
+
+            ImGui.TextDisabled(friend.Key);
+            if (watching)
+            {
+                ImGui.SameLine();
+                var visible = streamPanel?.IsWindowVisible(friend.Key) == true;
+                if (ImGui.SmallButton(visible ? "Hide window" : "Show window"))
+                    streamPanel?.SetWindowVisible(friend.Key, !visible);
+            }
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Remove"))
+                removeIndex = friend.Index;
+            ImGui.Separator();
+            ImGui.PopID();
+        }
+        ImGui.EndChild();
+
+        if (!string.IsNullOrEmpty(watchError))
+            ImGui.TextColored(new Vector4(1f, 0.6f, 0.2f, 1f), watchError);
+
+        if (removeIndex.HasValue)
+        {
+            var removedKey = StreamPanel.NormalizeId(config.SyncFriends[removeIndex.Value].Key);
+            config.SyncFriends.RemoveAt(removeIndex.Value);
+            streamPanel?.StopWatching(removedKey);
+            SaveConfig();
+        }
+
+        if (watchKey != null && streamPanel != null)
+            watchError = streamPanel.TryWatch(watchKey, out var error) ? null : error;
+        if (stopKey != null)
+        {
+            streamPanel?.StopWatching(stopKey);
+            watchError = null;
+        }
+        ImGui.Spacing();
+        DrawInsetText("Add friend");
+        ImGui.SetNextItemWidth(-1);
+        if (ImGui.InputTextWithHint("##syncid", "Player ID (example: K7QX-4MRT)", ref syncIdInput, 16))
+            watchError = null;
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##syncname", "Nickname (optional)", ref syncNameInput, 128);
+
+        if (ImGui.Button("Add friend", new Vector2(-1, 0)) && !string.IsNullOrWhiteSpace(syncIdInput))
+        {
+            var normalized = StreamPanel.NormalizeId(syncIdInput);
+            var idCore = PlayerIds.Digits(normalized);
+            if (idCore.Length is < 6 or > 8)
+            {
+                watchError = "Player IDs use 6-8 letters or digits.";
+            }
+            else if (config.SyncFriends.Any(friend => StreamPanel.NormalizeId(friend.Key) == normalized))
+            {
+                watchError = "That player is already in your friends list.";
+            }
+            else
+            {
+                config.SyncFriends.Add(new SyncFriend { Key = normalized, Name = syncNameInput.Trim() });
+                syncIdInput = string.Empty;
+                syncNameInput = string.Empty;
+                syncFilter = string.Empty;
+                watchError = null;
+                lastSyncCheck = DateTime.MinValue;
+                SaveConfig();
+            }
+        }
+    }
+
+    private void DrawSyncSectionLegacy()
     {
         ImGui.TextUnformatted("Sync");
 
@@ -1528,7 +1916,7 @@ public sealed class EmulatorService : IDisposable
             && !string.IsNullOrEmpty(config.PlayerId)
             && config.PlayerIdUid == uid;
 
-        DrawPlayerIdCard(registered);
+        DrawShareablePlayerId();
         ImGui.Spacing();
 
         if (registered)
@@ -1585,7 +1973,7 @@ public sealed class EmulatorService : IDisposable
             {
                 if (ImGui.Button("Go live", new Vector2(-1, 0)))
                 {
-                    streamPanel?.GoLive(uid, config.PlayerCharacterName, config.PlayerId);
+                    streamPanel?.GoLive(uid, config.PlayerCharacterName, config.PlayerId, CreateLocalScreenState());
                 }
             }
             else
@@ -1868,19 +2256,10 @@ public sealed class EmulatorService : IDisposable
         if (watchScreens.TryGetValue(playerId, out var existing))
             return existing;
 
-        config.WatchScreenPositions.TryGetValue(playerId, out var saved);
         var renderer = new WorldScreenRenderer(
             gameGui, textureProvider, streamConfig,
             GetPlayerPos, GetPlayerRot, GetNearbyPlayerPositions,
-            saved,
-            pos =>
-            {
-                if (pos.Length == 3)
-                    config.WatchScreenPositions[playerId] = pos;
-                else
-                    config.WatchScreenPositions.Remove(playerId);
-                SaveConfig();
-            });
+            savedPosition: null);
         watchScreens[playerId] = renderer;
         return renderer;
     }
@@ -1898,38 +2277,11 @@ public sealed class EmulatorService : IDisposable
     {
         if (worldScreen == null) return;
 
-        ImGui.TextUnformatted("World screen");
-
-        var width = config.ScreenWidth;
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.SliderFloat("##screenwidth", ref width, 0.5f, 5f, "%.1f yalms wide"))
-        {
-            config.ScreenWidth = width;
-            streamConfig.ScreenWidth = width;
-            SaveConfig();
-        }
-
-        var height = config.ScreenHeight;
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.SliderFloat("##screenheight", ref height, 0f, 4f, "%.1f yalms high"))
-        {
-            config.ScreenHeight = height;
-            streamConfig.ScreenHeight = height;
-            SaveConfig();
-        }
-
-        var opacity = config.ScreenOpacity;
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.SliderFloat("##screenopacity", ref opacity, 0.1f, 1f, "%.0f%% opacity"))
-        {
-            config.ScreenOpacity = opacity;
-            streamConfig.ScreenOpacity = opacity;
-            SaveConfig();
-        }
+        DrawInsetText("World screen");
 
         if (worldScreen.PlacementMode)
         {
-            ImGui.TextWrapped("Click in the world to place the screen. Right-click to cancel.");
+            DrawInsetTextWrapped("Click a surface to place the screen's bottom edge there. It mounts to walls and stands upright on floors or object tops. Right-click to cancel.");
             if (ImGui.Button("Cancel placement", new Vector2(-1, 0)))
                 worldScreen.PlacementMode = false;
         }
@@ -1949,20 +2301,11 @@ public sealed class EmulatorService : IDisposable
                 ImGui.TextWrapped($"Occlusion: {worldScreen.OcclusionDebug}");
         }
 
-        ImGui.TextWrapped("Your local screen only appears in the world while you are live.");
-
-        var dx = config.UseDxWorldScreen;
-        if (ImGui.Checkbox("DX11 depth integration (experimental)", ref dx))
-        {
-            config.UseDxWorldScreen = dx;
-            SaveConfig();
-        }
         if (dxScreen is { Failed: true })
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "DX11 mode failed to initialise — falling back to the overlay.");
 
         if (watchScreens.Count > 0)
-            ImGui.TextWrapped(
-                "Watched streams get their own screens — use the Screen button in the friend list to place them.");
+            ImGui.TextDisabled("Watched screens use the live host's placement and size.");
     }
 
     // Draw the viewer windows for watched streams (called from Plugin.Draw).
@@ -1996,9 +2339,9 @@ public sealed class EmulatorService : IDisposable
 
         dxScreen?.Disable();
 
-        // Local screen: it is the in-world broadcast of your stream, so it
-        // only exists while you are live (placement mode always draws).
-        if (worldScreen.PlacementMode || streamPanel is { IsLive: true })
+        // Placement mode always previews. The local broadcast itself is
+        // opt-in, even while the player is streaming.
+        if (worldScreen.PlacementMode || (config.ShowLocalWorldScreen && streamPanel is { IsLive: true }))
         {
             if (core is { IsGameLoaded: true })
             {
@@ -2029,6 +2372,14 @@ public sealed class EmulatorService : IDisposable
             active.Add(key);
 
             var renderer = GetOrCreateWatchScreen(key);
+            var stateVersion = watchScreenStateVersions.TryGetValue(key, out var currentStateVersion)
+                ? currentStateVersion : -1L;
+            if (client.TryGetWorldScreenState(ref stateVersion, out var state))
+            {
+                watchScreenStateVersions[key] = stateVersion;
+                renderer.ApplyRemoteState(state);
+            }
+
             var version = watchVersions.TryGetValue(key, out var v) ? v : -1L;
             if (client.TryGetFrame(ref version, out var rgba, out var w, out var h))
             {
@@ -2044,6 +2395,9 @@ public sealed class EmulatorService : IDisposable
             watchScreens[key].Dispose();
             watchScreens.Remove(key);
             watchVersions.Remove(key);
+            watchScreenStateVersions.Remove(key);
+            dxWatchVersions.Remove(key);
+            dxWatchFrames.Remove(key);
         }
     }
 
@@ -2051,37 +2405,94 @@ public sealed class EmulatorService : IDisposable
 
     // DX11 path: estimate the camera, gather quads + frames, hand them to
     // the renderer; the Present hook draws them with the scene depth.
-    private void DrawDxWorldScreen()
+    private unsafe void DrawDxWorldScreen()
     {
         if (dxScreen == null || dxScreen.Failed || streamPanel == null)
             return;
 
-        var io = ImGui.GetIO();
         Matrix4x4? vp = null;
-        var camPos = GetPlayerPos();
-        if (camPos != null &&
-            Rendering.CameraEstimator.TryEstimate(gameGui, new Vector2(io.DisplaySize.X, io.DisplaySize.Y), camPos.Value + new Vector3(0, 1.5f, 0), out var m))
+        Vector3? cameraPos = null;
+        var projectionCandidates = new System.Collections.Generic.List<(string Name, Matrix4x4 Matrix)>();
+        var cameraManager = FfxivCameraManager.Instance();
+        var camera = cameraManager != null ? cameraManager->CurrentCamera : null;
+        if (camera != null && camera->RenderCamera != null)
         {
-            vp = m;
+            // This is the same transform used by FFXIVClientStructs'
+            // WorldToScreen helper, including the game's exact clip-Z and
+            // reverse-Z projection. It keeps our vertices in the same depth
+            // space as RenderTargetManager.DepthStencil.
+            Matrix4x4 sceneView = camera->ViewMatrix;
+            Matrix4x4 renderView = camera->RenderCamera->ViewMatrix;
+            Matrix4x4 projection = camera->RenderCamera->ProjectionMatrix;
+            Matrix4x4 projection2 = camera->RenderCamera->ProjectionMatrix2;
+            var projectionHasDepth = MathF.Abs(projection.M13) + MathF.Abs(projection.M23)
+                + MathF.Abs(projection.M33) + MathF.Abs(projection.M43) > 1e-7f;
+            var projection2HasDepth = MathF.Abs(projection2.M13) + MathF.Abs(projection2.M23)
+                + MathF.Abs(projection2.M33) + MathF.Abs(projection2.M43) > 1e-7f;
+            var selectedProjection = projectionHasDepth ? projection : projection2;
+
+            // FFXIV's exposed view matrix is a 3x4 camera transform with a
+            // zero homogeneous-W row. That preserves projected X/Y/W but
+            // drops the projection's depth numerator when matrices are
+            // multiplied on the CPU. Rebuild clip Z from the camera's exact
+            // projection mode: clipZ = depthA * clipW + depthB.
+            var nearPlane = camera->RenderCamera->NearPlane;
+            var farPlane = camera->RenderCamera->FarPlane;
+            double depthA;
+            double depthB;
+            if (camera->RenderCamera->StandardZ)
+            {
+                depthA = camera->RenderCamera->FiniteFarPlane
+                    ? farPlane / (farPlane - nearPlane)
+                    : 1.0;
+                depthB = camera->RenderCamera->FiniteFarPlane
+                    ? -nearPlane * farPlane / (farPlane - nearPlane)
+                    : -nearPlane;
+            }
+            else
+            {
+                depthA = camera->RenderCamera->FiniteFarPlane
+                    ? -nearPlane / (farPlane - nearPlane)
+                    : 0.0;
+                depthB = camera->RenderCamera->FiniteFarPlane
+                    ? nearPlane * farPlane / (farPlane - nearPlane)
+                    : nearPlane;
+            }
+            projectionCandidates.Add(("render/projection",
+                BuildDxViewProjection(renderView, projection, depthA, depthB)));
+            projectionCandidates.Add(("scene/projection",
+                BuildDxViewProjection(sceneView, projection, depthA, depthB)));
+            projectionCandidates.Add(("render/projection2",
+                BuildDxViewProjection(renderView, projection2, depthA, depthB)));
+            projectionCandidates.Add(("scene/projection2",
+                BuildDxViewProjection(sceneView, projection2, depthA, depthB)));
+            vp = projectionCandidates[0].Matrix;
+            cameraPos = camera->Position;
+
+            if (!loggedDxCameraMatrices)
+            {
+                loggedDxCameraMatrices = true;
+                log.Information($"[DxScreen] scene camera: standardZ={camera->RenderCamera->StandardZ}, "
+                    + $"finiteFar={camera->RenderCamera->FiniteFarPlane}, near={camera->RenderCamera->NearPlane:G6}, "
+                    + $"far={camera->RenderCamera->FarPlane:G6}, projectionDepth={projectionHasDepth}, "
+                    + $"projection2Depth={projection2HasDepth}, selected={(projectionHasDepth ? "ProjectionMatrix" : "ProjectionMatrix2")}, "
+                    + $"z1=({projection.M13:G6},{projection.M23:G6},{projection.M33:G6},{projection.M43:G6}), "
+                    + $"z2=({projection2.M13:G6},{projection2.M23:G6},{projection2.M33:G6},{projection2.M43:G6}), "
+                    + $"sceneViewW={sceneView.M44:G6}, renderViewW={renderView.M44:G6}, "
+                    + $"depthCurve=({depthA:G6},{depthB:G6}), "
+                    + $"vpZ=({vp.Value.M13:G6},{vp.Value.M23:G6},{vp.Value.M33:G6},{vp.Value.M43:G6}), "
+                    + $"vpW=({vp.Value.M14:G6},{vp.Value.M24:G6},{vp.Value.M34:G6},{vp.Value.M44:G6})");
+            }
         }
 
-        // Depth-row calibration points: the actual visible surface at a few
-        // screen positions, paired with their pixels.
         var calib = new System.Collections.Generic.List<(Vector3, Vector2)>();
-        foreach (var (fx, fy) in new[] { (0.5f, 0.5f), (0.35f, 0.4f), (0.65f, 0.4f), (0.5f, 0.65f), (0.3f, 0.6f), (0.7f, 0.6f) })
-        {
-            var px = new Vector2(io.DisplaySize.X * fx, io.DisplaySize.Y * fy);
-            if (gameGui.ScreenToWorld(px, out var wp, 100f))
-                calib.Add((wp, px));
-            if (calib.Count >= 4)
-                break;
-        }
 
         var quads = new System.Collections.Generic.List<Rendering.DxWorldRenderer.ScreenQuad>();
         var frames = new System.Collections.Generic.Dictionary<string, (byte[], int, int)>();
 
-        // Local screen (only while live).
-        if (streamPanel.IsLive && worldScreen!.IsPlaced && core is { IsGameLoaded: true })
+        // The local screen is opt-in even while the player is live.
+        if (config.ShowLocalWorldScreen && streamPanel.IsLive
+            && worldScreen!.IsPlaced && core is { IsGameLoaded: true })
         {
             var localVer = core.FrameVersion;
             if (localVer != dxLocalVersion && core.TryGetFrame(out var rgba, out var w, out var h))
@@ -2094,24 +2505,30 @@ public sealed class EmulatorService : IDisposable
 
             if (dxLocalFrame != null)
             {
-                quads.Add(new Rendering.DxWorldRenderer.ScreenQuad
-                {
-                    Id = "local",
-                    Center = worldScreen.ScreenPosition,
-                    HalfWidth = config.ScreenWidth / 2f,
-                    HalfHeight = config.ScreenHeight / 2f,
-                });
+                quads.Add(CreateDxScreenQuad("local", worldScreen, cameraPos));
                 frames["local"] = (dxLocalFrame, dxLocalW, dxLocalH);
             }
         }
 
-        // Watched streams with a placed screen.
+        // Watched streams use the live host's saved screen state.
+        streamPanel.FlushRemoveQueue();
+        var activeWatchScreens = new System.Collections.Generic.HashSet<string>();
         foreach (var client in streamPanel.Clients)
         {
             if (client.SubscribedPlayerId == null)
                 continue;
             var key = StreamPanel.NormalizeId(client.SubscribedPlayerId);
-            if (!watchScreens.TryGetValue(key, out var renderer) || !renderer.IsPlaced)
+            activeWatchScreens.Add(key);
+            var renderer = GetOrCreateWatchScreen(key);
+            var stateVersion = watchScreenStateVersions.TryGetValue(key, out var currentStateVersion)
+                ? currentStateVersion : -1L;
+            if (client.TryGetWorldScreenState(ref stateVersion, out var state))
+            {
+                watchScreenStateVersions[key] = stateVersion;
+                renderer.ApplyRemoteState(state);
+            }
+
+            if (!renderer.IsPlaced)
                 continue;
 
             var version = dxWatchVersions.TryGetValue(key, out var v) ? v : -1L;
@@ -2123,18 +2540,174 @@ public sealed class EmulatorService : IDisposable
 
             if (dxWatchFrames.TryGetValue(key, out var frame))
             {
-                quads.Add(new Rendering.DxWorldRenderer.ScreenQuad
-                {
-                    Id = key,
-                    Center = renderer.ScreenPosition,
-                    HalfWidth = config.ScreenWidth / 2f,
-                    HalfHeight = config.ScreenHeight / 2f,
-                });
+                quads.Add(CreateDxScreenQuad(key, renderer, cameraPos));
                 frames[key] = frame;
             }
         }
 
+        foreach (var key in watchScreens.Keys.Where(key => !activeWatchScreens.Contains(key)).ToList())
+        {
+            watchScreens[key].Dispose();
+            watchScreens.Remove(key);
+            watchVersions.Remove(key);
+            watchScreenStateVersions.Remove(key);
+            dxWatchVersions.Remove(key);
+            dxWatchFrames.Remove(key);
+        }
+
+        string? projectionSelection = null;
+        string? projectionErrors = null;
+        if (quads.Count > 0 && projectionCandidates.Count > 0)
+        {
+            // RenderCamera is synchronized to the retained scene-depth frame.
+            // WorldToScreen can advance one game tick ahead; fitting to it
+            // made a nearly coplanar screen flicker while the camera moved.
+            vp = projectionCandidates[0].Matrix;
+            _ = SelectBestDxProjection(
+                quads[0], projectionCandidates, out _, out projectionErrors);
+            projectionSelection = "render/projection (depth-synced)";
+        }
+
+        if (vp.HasValue && quads.Count > 0
+            && (DateTime.UtcNow - lastDxProjectionComparison).TotalSeconds >= 3)
+        {
+            lastDxProjectionComparison = DateTime.UtcNow;
+            LogDxProjectionComparison(quads[0], vp.Value, projectionSelection, projectionErrors);
+        }
+
         dxScreen.SubmitFrame(vp, quads, frames, calib);
+    }
+
+    private static Matrix4x4 BuildDxViewProjection(
+        Matrix4x4 view, Matrix4x4 projection, double depthA, double depthB)
+    {
+        var combined = view * projection;
+        combined.M13 = (float)(depthA * combined.M14);
+        combined.M23 = (float)(depthA * combined.M24);
+        combined.M33 = (float)(depthA * combined.M34);
+        combined.M43 = (float)(depthA * combined.M44 + depthB);
+        return combined;
+    }
+
+    private Matrix4x4 SelectBestDxProjection(
+        Rendering.DxWorldRenderer.ScreenQuad quad,
+        System.Collections.Generic.IReadOnlyList<(string Name, Matrix4x4 Matrix)> candidates,
+        out string selectedName,
+        out string errorSummary)
+    {
+        var corners = GetDxQuadCorners(quad);
+        var gamePixels = new Vector2[corners.Length];
+        var validGameProjection = true;
+        for (var i = 0; i < corners.Length; i++)
+            validGameProjection &= gameGui.WorldToScreen(corners[i], out gamePixels[i], out _);
+
+        var display = ImGui.GetIO().DisplaySize;
+        var bestIndex = 0;
+        var bestError = float.PositiveInfinity;
+        var errors = new string[candidates.Count];
+        for (var candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+        {
+            var error = validGameProjection
+                ? GetDxProjectionError(corners, gamePixels, candidates[candidateIndex].Matrix, display)
+                : float.PositiveInfinity;
+            errors[candidateIndex] = $"{candidates[candidateIndex].Name}={error:F2}px";
+            if (error < bestError)
+            {
+                bestError = error;
+                bestIndex = candidateIndex;
+            }
+        }
+
+        selectedName = candidates[bestIndex].Name;
+        errorSummary = string.Join(", ", errors);
+        return candidates[bestIndex].Matrix;
+    }
+
+    private static float GetDxProjectionError(
+        Vector3[] corners, Vector2[] gamePixels, Matrix4x4 candidate, Vector2 display)
+    {
+        var total = 0f;
+        for (var i = 0; i < corners.Length; i++)
+        {
+            var clip = Vector4.Transform(new Vector4(corners[i], 1f), candidate);
+            if (clip.W <= 1e-6f)
+                return float.PositiveInfinity;
+            var matrixPixel = new Vector2(
+                (clip.X / clip.W * 0.5f + 0.5f) * display.X,
+                (0.5f - clip.Y / clip.W * 0.5f) * display.Y);
+            total += Vector2.Distance(matrixPixel, gamePixels[i]);
+        }
+
+        return total / corners.Length;
+    }
+
+    private static Vector3[] GetDxQuadCorners(Rendering.DxWorldRenderer.ScreenQuad quad)
+    {
+        var right = Vector3.Normalize(quad.Right) * quad.HalfWidth;
+        var up = Vector3.Normalize(quad.Up) * quad.HalfHeight;
+        return new[]
+        {
+            quad.Center - right + up,
+            quad.Center + right + up,
+            quad.Center + right - up,
+            quad.Center - right - up,
+        };
+    }
+
+    private void LogDxProjectionComparison(
+        Rendering.DxWorldRenderer.ScreenQuad quad, Matrix4x4 vp,
+        string? selection, string? errorSummary)
+    {
+        var corners = GetDxQuadCorners(quad);
+
+        var display = ImGui.GetIO().DisplaySize;
+        var labels = new[] { "tl", "tr", "br", "bl" };
+        var parts = new string[corners.Length];
+        for (var i = 0; i < corners.Length; i++)
+        {
+            var clip = Vector4.Transform(new Vector4(corners[i], 1f), vp);
+            var matrixPixel = MathF.Abs(clip.W) > 1e-6f
+                ? new Vector2(
+                    (clip.X / clip.W * 0.5f + 0.5f) * display.X,
+                    (0.5f - clip.Y / clip.W * 0.5f) * display.Y)
+                : new Vector2(float.NaN, float.NaN);
+            var inFront = gameGui.WorldToScreen(corners[i], out var gamePixel, out var inView);
+            var delta = Vector2.Distance(matrixPixel, gamePixel);
+            parts[i] = $"{labels[i]} game=({gamePixel.X:F1},{gamePixel.Y:F1}) "
+                + $"vp=({matrixPixel.X:F1},{matrixPixel.Y:F1}) d={delta:F2} "
+                + $"front={inFront} view={inView}";
+        }
+
+        log.Information($"[DxScreen] projection comparison: selected={selection}; {errorSummary}; "
+            + string.Join("; ", parts));
+    }
+
+    private Rendering.DxWorldRenderer.ScreenQuad CreateDxScreenQuad(
+        string id, WorldScreenRenderer renderer, Vector3? cameraPos)
+    {
+        var center = renderer.ScreenPosition;
+        // Placement already stores a small 0.03-yalm surface offset. Give
+        // the depth-tested quad another render-only 0.05-yalm clearance so
+        // rough/curved support geometry cannot z-fight through a flat video
+        // plane as the camera moves. This does not alter the saved anchor.
+        if (renderer.SurfaceNormal is { } surfaceNormal
+            && surfaceNormal.LengthSquared() > 1e-8f)
+        {
+            center += Vector3.Normalize(surfaceNormal) * 0.05f;
+        }
+        renderer.GetQuadBasis(cameraPos.GetValueOrDefault(center + Vector3.UnitZ), out var right, out var up);
+
+        return new Rendering.DxWorldRenderer.ScreenQuad
+        {
+            Id = id,
+            Center = center,
+            Right = right,
+            Up = up,
+            HalfWidth = renderer.ScreenWidth / 2f,
+            // All screens use the same 3:2 video aspect, but watched streams
+            // supply their own host-authoritative width.
+            HalfHeight = renderer.ScreenWidth / 3f,
+        };
     }
 
     internal WorldScreenRenderer? WorldScreen => worldScreen;

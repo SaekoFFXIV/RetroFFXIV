@@ -134,6 +134,13 @@ public sealed class ControlMsg
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Subscribers { get; set; }
 
+    // The live host owns the physical world-screen placement. The relay
+    // retains and forwards this state so every spectator uses the same
+    // position, orientation, and width, including after joining mid-stream.
+    [JsonPropertyName("screen")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorldScreenState? Screen { get; set; }
+
     public static ControlMsg? Parse(string json)
     {
         try { return JsonSerializer.Deserialize<ControlMsg>(json); }
@@ -174,4 +181,22 @@ public sealed class OnlinePlayerInfo
 
     [JsonPropertyName("live")]
     public bool Live { get; set; }
+}
+
+public sealed class WorldScreenState
+{
+    // Center position [x, y, z] followed by the outward normal [nx, ny, nz].
+    // A null position means the host has not placed a world screen.
+    [JsonPropertyName("position")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float[]? Position { get; set; }
+
+    [JsonPropertyName("width")]
+    public float Width { get; set; }
+
+    public WorldScreenState Clone() => new()
+    {
+        Position = Position is null ? null : (float[])Position.Clone(),
+        Width = Width,
+    };
 }

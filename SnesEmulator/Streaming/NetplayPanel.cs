@@ -57,8 +57,6 @@ internal sealed class NetplayPanel : IDisposable
             DrawSetup();
         }
 
-        ImGui.Separator();
-        DrawRelaySetting();
     }
 
     private void DrawActiveSession()
@@ -129,14 +127,15 @@ internal sealed class NetplayPanel : IDisposable
         }
     }
 
-    private void DrawRelaySetting()
+    // Netplay is an authenticated feature. If XIVAuth is removed while a
+    // session is active, leave cleanly instead of continuing anonymously.
+    public void StopForAuthLoss()
     {
-        ImGui.TextUnformatted("Relay");
-        ImGui.SetNextItemWidth(-1);
-        if (ImGui.InputTextWithHint("##nprelay", "wss://relay.example.com", ref relayUrl, 512))
-        {
-            config.RelayUrl = relayUrl;
-        }
+        if (session == null)
+            return;
+
+        inputManager.LocalPort = 0;
+        _ = Task.Run(() => session.DisconnectAsync());
     }
 
     private static Vector4 BitColor(uint rgba)

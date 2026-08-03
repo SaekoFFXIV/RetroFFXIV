@@ -10,9 +10,10 @@ namespace SnesEmulator.Rendering;
 // signatures or struct offsets — WorldToScreen is a stable Dalamud API, so
 // this survives patches that would break a memory-read camera.
 //
-// 2D correspondences only observe rows 1, 2 and 4 (the depth row never
-// affects x/y), so this returns the matrix with row 3 zeroed; the renderer
-// calibrates row 3 separately against the live depth buffer.
+// 2D correspondences only observe clip X, Y and W (clip Z never affects the
+// projected pixel), so this returns a System.Numerics row-vector matrix with
+// its clip-Z output column zeroed. The renderer calibrates that column
+// separately against the live depth buffer.
 public static class CameraEstimator
 {
     public static string LastDiagnostic { get; private set; } = "";
@@ -62,51 +63,147 @@ done:
             return false;
         }
 
-        // 11 unknowns: row1 (0-3), row2 (4-7), row4 as M14(8), M24(9), M44(10).
-        // Row4's z component (M43) is fixed to 1 as the scale anchor.
-        var rows = pts.Count * 2;
-        var a = new double[rows, 11];
-        var b = new double[rows];
-
-        for (var i = 0; i < pts.Count; i++)
+        // Solve the complete homogeneous 3x4 projection (clip X/Y/W).
+        // The old fit fixed W's world-Z coefficient to one, which becomes
+        // singular when the camera faces mostly along world X. Try each of
+        // the 12 coefficients as the scale anchor and retain the fit with the
+        // smallest reprojection residual.
+        if (!TrySolveProjection(pts, displaySize, out var s, out var worst, out var anchor))
         {
-            var (p, u, v) = pts[i];
-            var x = p.X; var y = p.Y; var z = p.Z;
-
-            a[2 * i, 0] = x; a[2 * i, 1] = y; a[2 * i, 2] = z; a[2 * i, 3] = 1;
-            a[2 * i, 8] = -u * x; a[2 * i, 9] = -u * y; a[2 * i, 10] = -u;
-            b[2 * i] = u * z;
-
-            a[2 * i + 1, 4] = x; a[2 * i + 1, 5] = y; a[2 * i + 1, 6] = z; a[2 * i + 1, 7] = 1;
-            a[2 * i + 1, 8] = -v * x; a[2 * i + 1, 9] = -v * y; a[2 * i + 1, 10] = -v;
-            b[2 * i + 1] = v * z;
-        }
-
-        if (!SolveLeastSquares(a, b, rows, 11, out var s))
-        {
-            LastDiagnostic = "least-squares solve singular";
+            LastDiagnostic = "projective least-squares solve singular";
             return false;
         }
 
+        // Vector4.Transform(v, m) uses a row vector, so output coordinates
+        // occupy matrix columns. Preserve every coefficient solved above;
+        // only the clip-Z output column is unknown/zero here.
         var m = new Matrix4x4(
             (float)s[0], (float)s[4], 0f, (float)s[8],
             (float)s[1], (float)s[5], 0f, (float)s[9],
-            0f, 0f, 0f, 1f,
-            (float)s[3], (float)s[7], 0f, (float)s[10]);
+            (float)s[2], (float)s[6], 0f, (float)s[10],
+            (float)s[3], (float)s[7], 0f, (float)s[11]);
 
-        // Self-validate: reproject the input points (x/y only) and require
-        // small pixel residuals.
+        if (worst > 3.0)
+        {
+            LastDiagnostic = $"reprojection error {worst:F1}px";
+            return false;
+        }
+
+        LastDiagnostic = $"ok ({pts.Count} pts, {worst:F2}px, anchor={anchor})";
+        matrix = m;
+        return true;
+    }
+
+    private static bool TrySolveProjection(
+        List<(Vector3 P, double U, double V)> pts,
+        Vector2 displaySize,
+        out double[] best,
+        out double bestWorst,
+        out int bestAnchor)
+    {
+        best = Array.Empty<double>();
+        bestWorst = double.PositiveInfinity;
+        bestAnchor = -1;
+        var rows = pts.Count * 2;
+
+        for (var anchor = 0; anchor < 12; anchor++)
+        {
+            var a = new double[rows, 11];
+            var b = new double[rows];
+
+            for (var i = 0; i < pts.Count; i++)
+            {
+                var (p, u, v) = pts[i];
+                var h = new[] { (double)p.X, p.Y, p.Z, 1.0 };
+                var rowX = new double[12];
+                var rowY = new double[12];
+                for (var j = 0; j < 4; j++)
+                {
+                    rowX[j] = h[j];
+                    rowX[8 + j] = -u * h[j];
+                    rowY[4 + j] = h[j];
+                    rowY[8 + j] = -v * h[j];
+                }
+
+                FillAnchoredRow(rowX, anchor, a, b, 2 * i);
+                FillAnchoredRow(rowY, anchor, a, b, 2 * i + 1);
+            }
+
+            if (!SolveLeastSquares(a, b, rows, 11, out var solved))
+                continue;
+
+            var coefficients = new double[12];
+            coefficients[anchor] = 1.0;
+            for (int source = 0, destination = 0; destination < coefficients.Length; destination++)
+            {
+                if (destination == anchor)
+                    continue;
+                coefficients[destination] = solved[source++];
+            }
+
+            // A perspective camera's W world-direction is the unit camera
+            // forward vector. This removes DLT's global scale ambiguity and
+            // lets the exact near-plane depth constant be applied afterward.
+            var wDirectionLength = Math.Sqrt(
+                coefficients[8] * coefficients[8]
+                + coefficients[9] * coefficients[9]
+                + coefficients[10] * coefficients[10]);
+            if (wDirectionLength < 1e-8 || double.IsNaN(wDirectionLength))
+                continue;
+            for (var i = 0; i < coefficients.Length; i++)
+                coefficients[i] /= wDirectionLength;
+
+            var negativeW = 0;
+            foreach (var (p, _, _) in pts)
+            {
+                var w = coefficients[8] * p.X + coefficients[9] * p.Y
+                    + coefficients[10] * p.Z + coefficients[11];
+                if (w < 0)
+                    negativeW++;
+            }
+            if (negativeW > pts.Count / 2)
+            {
+                for (var i = 0; i < coefficients.Length; i++)
+                    coefficients[i] = -coefficients[i];
+            }
+
+            var worst = GetWorstReprojectionError(pts, displaySize, coefficients);
+            if (worst < bestWorst)
+            {
+                best = coefficients;
+                bestWorst = worst;
+                bestAnchor = anchor;
+            }
+        }
+
+        return bestAnchor >= 0 && !double.IsNaN(bestWorst) && !double.IsInfinity(bestWorst);
+    }
+
+    private static void FillAnchoredRow(
+        double[] fullRow, int anchor, double[,] a, double[] b, int row)
+    {
+        b[row] = -fullRow[anchor];
+        for (int source = 0, destination = 0; source < fullRow.Length; source++)
+        {
+            if (source == anchor)
+                continue;
+            a[row, destination++] = fullRow[source];
+        }
+    }
+
+    private static double GetWorstReprojectionError(
+        List<(Vector3 P, double U, double V)> pts,
+        Vector2 displaySize,
+        double[] s)
+    {
         var worst = 0.0;
         foreach (var (p, u, v) in pts)
         {
             var cx = s[0] * p.X + s[1] * p.Y + s[2] * p.Z + s[3];
             var cy = s[4] * p.X + s[5] * p.Y + s[6] * p.Z + s[7];
-            var cw = s[8] * p.X + s[9] * p.Y + p.Z + s[10];
+            var cw = s[8] * p.X + s[9] * p.Y + s[10] * p.Z + s[11];
             if (Math.Abs(cw) < 1e-9)
-            {
-                LastDiagnostic = "degenerate w in validation";
-                return false;
-            }
+                return double.PositiveInfinity;
 
             var pu = (cx / cw + 1) * 0.5 * displaySize.X;
             var pv = (1 - cy / cw) * 0.5 * displaySize.Y;
@@ -115,15 +212,7 @@ done:
             worst = Math.Max(worst, Math.Sqrt(eu * eu + ev * ev));
         }
 
-        if (worst > 3.0)
-        {
-            LastDiagnostic = $"reprojection error {worst:F1}px";
-            return false;
-        }
-
-        LastDiagnostic = $"ok ({pts.Count} pts, {worst:F2}px)";
-        matrix = m;
-        return true;
+        return worst;
     }
 
     // Normal equations + Gaussian elimination with partial pivoting.
