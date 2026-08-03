@@ -2,13 +2,14 @@
 Fake host — generates a test pattern and streams it through the relay.
 Use this to verify the spectator window works without FFXIV.
 
-Goes live under a fixed dev player ID (1234-5678).
+Registers a dev identity and goes live under the player ID the relay
+issues for it (printed on start).
 
 Usage:
     python fake_host.py [relay_url]
 
-Then in another terminal:
-    python spectator.py 1234-5678 [relay_url]
+Then in another terminal (using the printed player ID):
+    python spectator.py <PLAYER_ID> [relay_url]
 
 Requires:  pip install av websockets
 """
@@ -26,7 +27,6 @@ import websockets
 
 RELAY = "wss://relay.nekomail.cc"
 UID = "fake-host-dev-uid"
-PLAYER_ID = "1234-5678"
 WIDTH, HEIGHT, FPS = 768, 672, 30
 BITRATE = 2_000_000
 
@@ -74,18 +74,26 @@ async def main():
 
     print(f"Connecting to {url} ...")
     async with websockets.connect(url) as ws:
-        # Go live under the dev player ID.
+        # Register to get the player ID tied to this dev uid.
+        await ws.send(json.dumps({"action": "register", "uid": UID, "name": "Fake Host"}))
+        r = json.loads(await ws.recv())
+        if r.get("type") != "registered":
+            print(f"Registration failed: {r}")
+            return
+        player_id = r["player_id"]
+
+        # Go live under it.
         await ws.send(json.dumps({
             "action": "go_live", "uid": UID,
-            "player_id": PLAYER_ID, "name": "Fake Host",
+            "player_id": player_id, "name": "Fake Host",
         }))
         r = json.loads(await ws.recv())
         if r.get("type") != "live_started":
             print(f"Failed: {r}")
             return
 
-        print(f"Live as player ID {PLAYER_ID}")
-        print(f"Watch with:  python spectator.py {PLAYER_ID} {relay_url}")
+        print(f"Live as player ID {player_id}")
+        print(f"Watch with:  python spectator.py {player_id} {relay_url}")
         print("Streaming test pattern... (Ctrl+C to stop)")
 
         # Send stream info.

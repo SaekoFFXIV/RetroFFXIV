@@ -2,14 +2,17 @@
 Local integration test for the Retro FFXIV relay — no FFXIV, no audio, no plugin.
 
 Tests:
-  1. Live streaming: host goes live under a player ID → sync_check shows
+  1. Registration: the relay issues a unique player ID tied to a uid,
+     idempotently; go_live is rejected for unregistered/mismatched IDs.
+  2. Live streaming: host goes live under their ID → sync_check shows
      them live → spectator subscribes by ID → receives video/audio →
      stop_live notifies the spectator.
-  2. Netplay: two players create/join → exchange input packets → both
+  3. Netplay: two players create/join → exchange input packets → both
      receive each other's inputs.
 
-Usage:
-  1. Start the relay:  python server.py
+The relay writes its registry to RELAY_REGISTRY (set it to a temp path
+when testing).  Usage:
+  1. Start the relay:  set RELAY_REGISTRY=%TEMP%\relay-test.json && python server.py
   2. Run this:         python test_relay.py
 
 Exit code 0 = all passed.
@@ -17,6 +20,7 @@ Exit code 0 = all passed.
 
 import asyncio
 import json
+import re
 import struct
 import sys
 
@@ -27,6 +31,8 @@ if not RELAY.endswith("/ws"):
     RELAY = RELAY.rstrip("/") + "/ws"
 PASS = 0
 FAIL = 0
+
+PLAYER_ID_RE = re.compile(r"^[A-Z2-9]{4}-[A-Z2-9]{4}$")
 
 
 def ok(name: str, cond: bool, detail: str = ""):
@@ -39,17 +45,55 @@ def ok(name: str, cond: bool, detail: str = ""):
         print(f"  ✗ {name}  {detail}")
 
 
-async def test_live_streaming():
-    print("\n── Live streaming (identity-based) ──")
+async def register(ws, uid: str, name: str = "") -> dict:
+    await ws.send(json.dumps({"action": "register", "uid": uid, "name": name}))
+    return json.loads(await ws.recv())
+
+
+async def test_registration_and_live():
+    print("\n── Registration + live streaming ──")
 
     host = await websockets.connect(RELAY)
     spec = await websockets.connect(RELAY)
     checker = await websockets.connect(RELAY)
 
     uid = "test-persistent-key-aaaa"
-    player_id = "1234-5678"
 
-    # Host goes live.
+    # go_live before registration is rejected.
+    await host.send(json.dumps({
+        "action": "go_live", "uid": uid,
+        "player_id": "ZZZZ-9999", "name": "Test Player",
+    }))
+    r = json.loads(await host.recv())
+    ok("go_live before registration rejected", r.get("type") == "error", str(r))
+
+    # Register: relay issues an ID in XXXX-XXXX form.
+    r = await register(host, uid, "Test Player")
+    ok("register issues player ID", r.get("type") == "registered"
+       and PLAYER_ID_RE.match(r.get("player_id", "")), str(r))
+    player_id = r["player_id"]
+
+    # Re-registering returns the SAME id (idempotent, tied to the uid).
+    r = await register(host, uid, "Test Player")
+    ok("re-register is idempotent", r.get("type") == "registered"
+       and r.get("player_id") == player_id, str(r))
+
+    # A different uid gets a different ID.
+    other = await websockets.connect(RELAY)
+    r = await register(other, "test-persistent-key-bbbb", "Other Player")
+    ok("second uid gets own ID", r.get("type") == "registered"
+       and r.get("player_id") != player_id, str(r))
+
+    # go_live with someone else's ID is rejected.
+    await host.send(json.dumps({
+        "action": "go_live", "uid": uid,
+        "player_id": r["player_id"], "name": "Test Player",
+    }))
+    resp = json.loads(await host.recv())
+    ok("go_live with foreign ID rejected", resp.get("type") == "error", str(resp))
+    await other.close()
+
+    # Host goes live under their own ID.
     await host.send(json.dumps({
         "action": "go_live", "uid": uid,
         "player_id": player_id, "name": "Test Player",
@@ -58,7 +102,7 @@ async def test_live_streaming():
     ok("host goes live", r.get("type") == "live_started" and r.get("player_id") == player_id, str(r))
 
     # sync_check reports the channel as live.
-    await checker.send(json.dumps({"action": "sync_check", "keys": [player_id, "9999-9999"]}))
+    await checker.send(json.dumps({"action": "sync_check", "keys": [player_id, "ZZZZ-9999"]}))
     r = json.loads(await checker.recv())
     live = r.get("live", [])
     ok("sync_check shows live", r.get("type") == "sync_status"
@@ -97,7 +141,7 @@ async def test_live_streaming():
 
     # Subscribing to a player who is not live fails.
     other = await websockets.connect(RELAY)
-    await other.send(json.dumps({"action": "subscribe", "player_id": "9999-9999"}))
+    await other.send(json.dumps({"action": "subscribe", "player_id": "ZZZZ-9999"}))
     r = json.loads(await other.recv())
     ok("subscribe to offline player fails", r.get("type") == "error", str(r))
     await other.close()
@@ -194,7 +238,7 @@ async def main():
     print(f"Target: {RELAY}")
 
     try:
-        await test_live_streaming()
+        await test_registration_and_live()
         await test_netplay()
     except ConnectionRefusedError:
         print("\n✗ Cannot connect to relay — is it running?  (python server.py)")

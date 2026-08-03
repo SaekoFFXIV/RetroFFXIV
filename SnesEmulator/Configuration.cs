@@ -28,9 +28,8 @@ public enum InputMode
 
 public sealed class SyncFriend
 {
-    // Player ID ("1234-5678") — Lodestone-derived, the public handle friends
-    // exchange.  Older configs may still hold raw XIVAuth keys; those entries
-    // need re-adding by ID.
+    // Player ID ("K7QX-4MRT") — the public handle friends exchange.  Older
+    // configs may still hold raw XIVAuth keys; those entries need re-adding.
     public string Key { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
 }
@@ -56,6 +55,12 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
     // Streaming / netplay.
     public string RelayUrl { get; set; } = "wss://relay.nekomail.cc";
     public string PlayerUid { get; set; } = System.Guid.NewGuid().ToString("N");
+
+    // The public player ID friends exchange ("K7QX-4MRT").  Issued by the
+    // relay on registration and tied to the XIVAuth identity in PlayerIdUid;
+    // empty until the player registers.
+    public string PlayerId { get; set; } = string.Empty;
+    public string PlayerIdUid { get; set; } = string.Empty;
 
     // XIVAuth identity.
     public string XivAuthAccessToken { get; set; } = string.Empty;

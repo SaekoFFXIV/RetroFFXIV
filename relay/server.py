@@ -1,18 +1,22 @@
 """
 Retro FFXIV streaming relay.
 
-A WebSocket hub with two modes:
-  1. Identity-based streaming: a host goes live under their player ID
-     (a short numeric code like "1234-5678", derived from their FFXIV
-     Lodestone ID via XIVAuth). Friends who know the ID subscribe — no
-     room codes.
-  2. Netplay: lockstep input routing between two players in a room.
+A WebSocket hub with three jobs:
+  1. Player registration: a plugin that has logged in with XIVAuth
+     registers its persistent_key; the relay issues a unique player ID
+     (a short code like "K7QX-4MRT") and ties it to that identity,
+     persisted across restarts.  Going live under an ID that isn't tied
+     to your account is rejected.
+  2. Identity-based streaming: a host goes live under their player ID;
+     friends who know the ID subscribe — no room codes.
+  3. Netplay: lockstep input routing between two players in a room.
 
 The relay never decodes or re-encodes — it is a dumb pipe with routing.
 
 Configuration (environment variables):
-    RELAY_HOST  Bind address   (default 0.0.0.0)
-    RELAY_PORT  Listen port    (default 8765)
+    RELAY_HOST      Bind address     (default 0.0.0.0)
+    RELAY_PORT      Listen port      (default 8765)
+    RELAY_REGISTRY  Player registry file (default ./registry.json)
 
 Local dev:
     uvicorn server:app --host 127.0.0.1 --port 8765
@@ -32,6 +36,7 @@ import logging
 import os
 import secrets
 import string
+import tempfile
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -41,11 +46,16 @@ log = logging.getLogger("relay")
 
 HOST = os.environ.get("RELAY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RELAY_PORT", "8765"))
+REGISTRY_PATH = os.environ.get("RELAY_REGISTRY", "registry.json")
 
 app = FastAPI(title="Retro FFXIV Relay")
 
 CODE_ALPHABET = string.ascii_uppercase + string.digits
 CODE_LENGTH = 4
+
+# Player IDs: unambiguous alphabet (no 0/O, 1/I/L), 8 chars as XXXX-XXXX.
+PLAYER_ID_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+PLAYER_ID_LENGTH = 8
 
 
 def generate_code() -> str:
@@ -53,8 +63,21 @@ def generate_code() -> str:
 
 
 def normalize_player_id(value: str) -> str:
-    """Player IDs are digits with a dash in the middle; compare on digits only."""
-    return "".join(ch for ch in value if ch.isdigit())
+    """Player IDs are letters/digits with a dash in the middle; compare
+    uppercased alphanumerics only."""
+    return "".join(ch for ch in value.upper() if ch.isascii() and ch.isalnum())
+
+
+def format_player_id(core: str) -> str:
+    if len(core) <= 3:
+        return core
+    split = len(core) // 2
+    return f"{core[:split]}-{core[split:]}"
+
+
+def generate_player_id() -> str:
+    core = "".join(secrets.choice(PLAYER_ID_ALPHABET) for _ in range(PLAYER_ID_LENGTH))
+    return format_player_id(core)
 
 
 @dataclass
@@ -86,6 +109,65 @@ live_channels: dict[str, LiveChannel] = {}       # uid → channel
 channels_by_player_id: dict[str, LiveChannel] = {}  # normalized ID → channel
 live_subscriptions: dict[WebSocket, str] = {}    # subscriber ws → uid they watch
 netplay_connections: dict[WebSocket, NetplayRoom] = {}
+
+# Player registry: uid → {"player_id": "XXXX-XXXX", "name": "..."}.
+# Persisted to RELAY_REGISTRY_PATH so IDs survive restarts.
+registry: dict[str, dict] = {}
+registry_by_id: dict[str, str] = {}  # normalized player ID → uid
+
+
+def load_registry() -> None:
+    try:
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return
+    except Exception:
+        log.exception("could not read registry %s — starting empty", REGISTRY_PATH)
+        return
+
+    for uid, entry in data.get("players", {}).items():
+        pid = normalize_player_id(entry.get("player_id", ""))
+        if not pid or pid in registry_by_id:
+            continue
+        registry[uid] = {"player_id": format_player_id(pid), "name": entry.get("name", "")}
+        registry_by_id[pid] = uid
+    log.info("registry loaded: %d players", len(registry))
+
+
+def save_registry() -> None:
+    data = {"players": registry}
+    try:
+        dirname = os.path.dirname(os.path.abspath(REGISTRY_PATH))
+        fd, tmp = tempfile.mkstemp(dir=dirname, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, REGISTRY_PATH)
+    except Exception:
+        log.exception("could not save registry to %s", REGISTRY_PATH)
+
+
+def register_player(uid: str, name: str) -> str:
+    """Idempotent: returns the player ID tied to this uid, issuing one if new."""
+    entry = registry.get(uid)
+    if entry is not None:
+        if name:
+            entry["name"] = name
+            save_registry()
+        return entry["player_id"]
+
+    pid = normalize_player_id(generate_player_id())
+    while pid in registry_by_id:
+        pid = normalize_player_id(generate_player_id())
+
+    registry[uid] = {"player_id": format_player_id(pid), "name": name}
+    registry_by_id[pid] = uid
+    save_registry()
+    log.info("registered %s → %s (%s)", uid[:8], format_player_id(pid), name or "anonymous")
+    return format_player_id(pid)
+
+
+load_registry()
 
 
 async def _teardown_channel(uid: str, notify: bool = True) -> None:
@@ -154,7 +236,11 @@ async def _safe_send_bytes(ws: WebSocket, data: bytes) -> None:
 
 @app.get("/health")
 async def health():
-    return {"netplay_rooms": len(netplay_rooms), "live_channels": len(live_channels)}
+    return {
+        "registered_players": len(registry),
+        "netplay_rooms": len(netplay_rooms),
+        "live_channels": len(live_channels),
+    }
 
 
 @app.websocket("/ws")
@@ -192,7 +278,16 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
 
     action = msg.get("action")
 
-    if action == "create_netplay":
+    if action == "register":
+        uid = msg.get("uid", "")
+        if not uid:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
+            return
+        player_id = register_player(uid, msg.get("name", ""))
+        await _safe_send_text(ws, {
+            "type": "registered", "uid": uid, "player_id": player_id,
+        })
+    elif action == "create_netplay":
         uid = msg.get("uid", "")
         if not uid:
             await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
@@ -304,6 +399,18 @@ async def _handle_join_netplay(ws: WebSocket, code: str, uid: str) -> None:
 
 async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
                           display_id: str, name: str) -> None:
+    # The ID must be the one tied to this account in the registry.
+    entry = registry.get(uid)
+    if entry is None:
+        await _safe_send_text(ws, {"type": "error", "message": "Not registered"})
+        return
+    if normalize_player_id(entry["player_id"]) != player_id:
+        await _safe_send_text(ws, {
+            "type": "error",
+            "message": "Player ID is not registered to this account",
+        })
+        return
+
     # Replacing an existing channel for this uid (reconnect).
     existing = live_channels.get(uid)
     if existing is not None:

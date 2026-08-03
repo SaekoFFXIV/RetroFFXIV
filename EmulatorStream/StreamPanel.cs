@@ -279,15 +279,8 @@ public sealed class StreamPanel : IDisposable
         }
     }
 
-    // Digits with a dash in the middle; compare on digits only.
-    public static string NormalizeId(string value)
-    {
-        var digits = new string(value.Where(char.IsDigit).ToArray());
-        if (digits.Length <= 3)
-            return digits;
-        var split = digits.Length / 2;
-        return $"{digits[..split]}-{digits[split..]}";
-    }
+    // Player IDs compare on their core chars only (dash/case insensitive).
+    public static string NormalizeId(string value) => PlayerIds.Normalize(value);
 
     public void Dispose()
     {

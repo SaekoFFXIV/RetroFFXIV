@@ -7,3 +7,8 @@ services:
     environment:
       - RELAY_HOST=0.0.0.0
       - RELAY_PORT=8765
+      # Player ID registry persists across restarts.  The container runs as
+      # nobody, so the host dir must be writable by it:  chown -R nobody ./data
+      - RELAY_REGISTRY=/data/registry.json
+    volumes:
+      - ./data:/data

@@ -359,20 +359,6 @@ public sealed class XivAuthService : IDisposable
             ? config.PlayerPersistentKey
             : config.PlayerUid;
 
-    // The short public player ID (Lightless/PlayerSync style): the
-    // character's Lodestone ID split by a dash in the middle,
-    // e.g. 12345678 → "1234-5678".  Empty when not logged in.
-    public string GetPlayerId() => FormatPlayerId(config.PlayerLodestoneId);
-
-    public static string FormatPlayerId(long lodestoneId)
-    {
-        if (lodestoneId <= 0)
-            return string.Empty;
-        var digits = lodestoneId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var split = digits.Length / 2;
-        return $"{digits[..split]}-{digits[split..]}";
-    }
-
     public void Dispose()
     {
         pollCts?.Cancel();

@@ -98,6 +98,11 @@ public sealed class EmulatorService : IDisposable
     private bool syncCheckInFlight;
     private string? watchError;
 
+    // Player ID registration with the relay (tied to the XIVAuth account).
+    private bool playerRegistering;
+    private string? playerRegError;
+    private DateTime lastRegisterAttempt = DateTime.MinValue;
+
     private RetroCore? core;
     private AudioPlayer? audio;
     private IDalamudTextureWrap? texture;
@@ -151,6 +156,11 @@ public sealed class EmulatorService : IDisposable
 
         romBrowser = new RomBrowser(config, SelectRom, GetRomExtensions);
         xivAuth = new XivAuthService(config, msg => log.Information("[XIVAuth] {Msg}", msg), SaveConfig);
+        xivAuth.StateChanged += () =>
+        {
+            if (xivAuth.IsLoggedIn)
+                TryRegisterPlayerId(auto: true);
+        };
         streamConfig = config.GetStreamConfig();
         streamPanel = new StreamPanel(
             streamConfig, textureProvider,
@@ -1341,22 +1351,7 @@ public sealed class EmulatorService : IDisposable
         {
             ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), $"{config.PlayerCharacterName} ({config.PlayerWorld})");
             ImGui.TextDisabled($"Lodestone ID: {config.PlayerLodestoneId}");
-
-            var playerId = xivAuth.GetPlayerId();
-            if (!string.IsNullOrEmpty(playerId))
-            {
-                ImGui.TextUnformatted("Player ID:");
-                ImGui.SameLine();
-                ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), playerId);
-                ImGui.SameLine();
-                if (ImGui.SmallButton("Copy"))
-                    ImGui.SetClipboardText(playerId);
-                ImGui.TextWrapped("Share this ID with friends so they can watch your stream.");
-            }
-            else
-            {
-                ImGui.TextWrapped("No Lodestone ID on this character — streaming needs one.");
-            }
+            ImGui.TextWrapped("Your player ID is registered against this account — see the Sync section below.");
 
             if (ImGui.Button("Log out"))
             {
@@ -1402,13 +1397,43 @@ public sealed class EmulatorService : IDisposable
     {
         ImGui.TextUnformatted("Sync");
 
-        if (!xivAuth.IsLoggedIn)
+        var uid = xivAuth.GetPlayerUid();
+        var registered = xivAuth.IsLoggedIn
+            && !string.IsNullOrEmpty(config.PlayerId)
+            && config.PlayerIdUid == uid;
+
+        // Player ID registration (tied to the XIVAuth account).
+        if (registered)
         {
-            ImGui.TextWrapped("Log in with XIVAuth above to go live and sync with friends.");
-            return;
+            ImGui.TextUnformatted("Your Player ID:");
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), config.PlayerId);
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Copy"))
+                ImGui.SetClipboardText(config.PlayerId);
+            ImGui.TextWrapped("Tied to this character's XIVAuth account. Share it with friends so they can watch you.");
+        }
+        else if (!xivAuth.IsLoggedIn)
+        {
+            ImGui.TextWrapped("Log in with XIVAuth above to register your player ID and go live. Watching friends needs no login.");
+        }
+        else
+        {
+            TryRegisterPlayerId(auto: true);
+            if (playerRegistering)
+            {
+                ImGui.TextWrapped("Registering your player ID with the relay...");
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(playerRegError))
+                    ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"Registration failed: {playerRegError}");
+                if (ImGui.Button("Register player ID"))
+                    TryRegisterPlayerId(auto: false);
+            }
         }
 
-        var playerId = xivAuth.GetPlayerId();
+        ImGui.Spacing();
 
         // Go live / stop live.
         if (streamPanel is { IsLive: true })
@@ -1423,9 +1448,9 @@ public sealed class EmulatorService : IDisposable
                 streamPanel.StopLive();
             }
         }
-        else if (string.IsNullOrEmpty(playerId))
+        else if (!registered)
         {
-            ImGui.TextWrapped("This character has no Lodestone ID, so it can't go live.");
+            ImGui.TextWrapped("Go live once your player ID is registered.");
         }
         else
         {
@@ -1434,8 +1459,7 @@ public sealed class EmulatorService : IDisposable
             {
                 if (ImGui.Button("Go live", new Vector2(-1, 0)))
                 {
-                    streamPanel?.GoLive(
-                        xivAuth.GetPlayerUid(), config.PlayerCharacterName, playerId);
+                    streamPanel?.GoLive(uid, config.PlayerCharacterName, config.PlayerId);
                 }
             }
             else
@@ -1553,7 +1577,7 @@ public sealed class EmulatorService : IDisposable
 
         // Add friend by player ID.
         ImGui.SetNextItemWidth(-1);
-        if (ImGui.InputTextWithHint("##syncid", "Player ID (e.g. 1234-5678)", ref syncIdInput, 16))
+        if (ImGui.InputTextWithHint("##syncid", "Player ID (e.g. K7QX-4MRT)", ref syncIdInput, 16))
             watchError = null;
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##syncname", "Name (optional)", ref syncNameInput, 128);
@@ -1561,10 +1585,10 @@ public sealed class EmulatorService : IDisposable
         if (ImGui.Button("Add friend") && !string.IsNullOrWhiteSpace(syncIdInput))
         {
             var normalized = StreamPanel.NormalizeId(syncIdInput);
-            var digits = normalized.Replace("-", "");
-            if (digits.Length is < 6 or > 8)
+            var core = PlayerIds.Digits(normalized);
+            if (core.Length is < 6 or > 8)
             {
-                watchError = "Player IDs are 6-8 digits, e.g. 1234-5678.";
+                watchError = "Player IDs are 6-8 letters/digits, e.g. K7QX-4MRT.";
             }
             else if (config.SyncFriends.Any(f => StreamPanel.NormalizeId(f.Key) == normalized))
             {
@@ -1584,6 +1608,71 @@ public sealed class EmulatorService : IDisposable
                 SaveConfig();
             }
         }
+    }
+
+    // Register (or re-register after a character change) this account's
+    // player ID with the relay.  The relay issues the ID and ties it to the
+    // XIVAuth identity, so streaming identity and login stay coupled.
+    private void TryRegisterPlayerId(bool auto)
+    {
+        if (playerRegistering || !xivAuth.IsLoggedIn)
+            return;
+
+        var uid = xivAuth.GetPlayerUid();
+        if (!string.IsNullOrEmpty(config.PlayerId) && config.PlayerIdUid == uid)
+            return;
+
+        // Auto-retries are throttled; the manual button always goes through.
+        if (auto && (DateTime.UtcNow - lastRegisterAttempt).TotalSeconds < 30)
+            return;
+
+        lastRegisterAttempt = DateTime.UtcNow;
+        playerRegistering = true;
+        playerRegError = null;
+
+        var relayUrl = streamPanel?.RelayUrl ?? config.RelayUrl;
+        var name = config.PlayerCharacterName;
+
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                using var ws = new System.Net.WebSockets.ClientWebSocket();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
+                await ws.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), cts.Token);
+
+                var json = new ControlMsg { Action = "register", Uid = uid, Name = name }.ToJson();
+                await ws.SendAsync(
+                    new ArraySegment<byte>(System.Text.Encoding.UTF8.GetBytes(json)),
+                    System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+                var buffer = new byte[4096];
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                var msg = result.MessageType == System.Net.WebSockets.WebSocketMessageType.Text
+                    ? ControlMsg.Parse(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count))
+                    : null;
+
+                if (msg?.Type == "registered" && !string.IsNullOrEmpty(msg.PlayerId))
+                {
+                    config.PlayerId = msg.PlayerId;
+                    config.PlayerIdUid = uid;
+                    SaveConfig();
+                    log.Information($"[Sync] player ID registered: {msg.PlayerId}");
+                }
+                else
+                {
+                    playerRegError = msg?.Message ?? "No response from relay";
+                }
+            }
+            catch (Exception ex)
+            {
+                playerRegError = ex.Message;
+            }
+            finally
+            {
+                playerRegistering = false;
+            }
+        });
     }
 
     // Poll the relay for which synced friends are live (every few seconds).

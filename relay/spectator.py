@@ -5,8 +5,8 @@ Usage:
     python spectator.py <PLAYER_ID> [relay_url]
 
 Examples:
-    python spectator.py 1234-5678
-    python spectator.py 1234-5678 wss://relay.nekomail.cc
+    python spectator.py K7QX-4MRT
+    python spectator.py K7QX-4MRT wss://relay.nekomail.cc
 
 Requires:  pip install opencv-python av websockets
 """

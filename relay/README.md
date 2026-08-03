@@ -1,11 +1,13 @@
 # Retro FFXIV Relay
 
 WebSocket hub for the RetroFFXIV emulator plugin. Streaming is
-identity-based: a host goes live under their **player ID** (a short
-numeric code like `1234-5678`, derived from their FFXIV Lodestone ID via
-XIVAuth) and friends subscribe by that ID — no room codes. The relay also
-routes lockstep netplay inputs. No decoding, no re-encoding — a dumb pipe
-with routing.
+identity-based: a player who has logged in with XIVAuth **registers**
+their account and the relay issues them a unique **player ID** (a short
+code like `K7QX-4MRT`) tied permanently to that identity. Hosts go live
+under their ID; friends subscribe by that ID — no room codes. Going live
+under an ID that isn't tied to your account is rejected. The relay also
+routes lockstep netplay inputs. No decoding, no re-encoding — a dumb
+pipe with routing.
 
 ## Quick start (local dev)
 
@@ -57,10 +59,11 @@ anyone's home address.
 
 ## Configuration
 
-| Env var      | Default   | Description       |
-|--------------|-----------|-------------------|
-| `RELAY_HOST` | `0.0.0.0` | Bind address      |
-| `RELAY_PORT` | `8765`    | Listen port       |
+| Env var          | Default        | Description                        |
+|------------------|----------------|------------------------------------|
+| `RELAY_HOST`     | `0.0.0.0`      | Bind address                       |
+| `RELAY_PORT`     | `8765`         | Listen port                        |
+| `RELAY_REGISTRY` | `registry.json`| Player ID registry file (persisted)|
 
 ## Streaming protocol
 
@@ -68,25 +71,31 @@ anyone's home address.
 
 | Direction          | Message                                                                  |
 |--------------------|--------------------------------------------------------------------------|
-| Host → Relay       | `{"action": "go_live", "uid": "<persistent_key>", "player_id": "1234-5678", "name": "Character Name"}` |
-| Relay → Host       | `{"type": "live_started", "uid": "…", "player_id": "1234-5678", "subscribers": 0}` |
+| Client → Relay     | `{"action": "register", "uid": "<persistent_key>", "name": "Character Name"}` |
+| Relay → Client     | `{"type": "registered", "uid": "…", "player_id": "K7QX-4MRT"}`          |
+| Host → Relay       | `{"action": "go_live", "uid": "<persistent_key>", "player_id": "K7QX-4MRT", "name": "Character Name"}` |
+| Relay → Host       | `{"type": "live_started", "uid": "…", "player_id": "K7QX-4MRT", "subscribers": 0}` |
 | Relay → Host       | `{"type": "viewers", "count": 3}`                                        |
 | Host → Relay       | `{"action": "stop_live"}`                                               |
 | Relay → Host       | `{"type": "live_stopped"}`                                              |
-| Spectator → Relay  | `{"action": "subscribe", "player_id": "1234-5678"}`                     |
-| Relay → Spectator  | `{"type": "subscribed", "uid": "…", "player_id": "1234-5678", "name": "…"}` |
+| Spectator → Relay  | `{"action": "subscribe", "player_id": "K7QX-4MRT"}`                     |
+| Relay → Spectator  | `{"type": "subscribed", "uid": "…", "player_id": "K7QX-4MRT", "name": "…"}` |
 | Spectator → Relay  | `{"action": "unsubscribe"}`                                             |
 | Relay → Spectator  | `{"type": "live_ended", "uid": "…"}`                                    |
-| Client → Relay     | `{"action": "sync_check", "keys": ["1234-5678", …]}`                    |
-| Relay → Client     | `{"type": "sync_status", "live": [{"player_id": "1234-5678", "name": "…", "viewers": 2}]}` |
+| Client → Relay     | `{"action": "sync_check", "keys": ["K7QX-4MRT", …]}`                    |
+| Relay → Client     | `{"type": "sync_status", "live": [{"player_id": "K7QX-4MRT", "name": "…", "viewers": 2}]}` |
 | Relay → either     | `{"type": "error", "message": "..."}`                                   |
 
 `uid` is the XIVAuth persistent_key (channel identity, used for
-reconnects). `player_id` is the short public code friends exchange; the
-relay indexes live channels by it. Player IDs compare on digits only
-(`1234-5678` == `12345678`). Reconnecting host with the same uid reclaims
-the channel and keeps its subscribers; a new host under the same player_id
-replaces a stale one.
+reconnects). `player_id` is the short public code friends exchange.
+**Registration:** `register` is idempotent — the relay generates an ID
+from an unambiguous alphabet (no 0/O/1/I/L), ties it to the uid, and
+persists the mapping to the registry file; re-registering returns the
+same ID. `go_live` is rejected unless the ID is registered to that uid.
+Player IDs compare case-insensitively on their letters/digits
+(`K7QX-4MRT` == `k7qx4mrt`). Reconnecting host with the same uid
+reclaims the channel and keeps its subscribers; a new host going live
+under the same player ID replaces a stale one.
 
 **Binary — data plane (host → relay → spectators):**
 

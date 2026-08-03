@@ -12,3 +12,7 @@ obj/
 ## NuGet
 packages/
 *.nupkg
+
+## Relay runtime state
+relay/registry.json
+relay/data/
