@@ -1224,7 +1224,7 @@ public sealed class EmulatorService : IDisposable
         }
         if (dxScreen is { Failed: true })
             ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f),
-                "Depth rendering could not initialise; using the overlay instead.");
+                "Depth rendering could not initialise; the in-world video is disabled to preserve occlusion.");
 
         ImGui.Spacing();
         DrawInsetText("CRT effects");
@@ -1894,7 +1894,7 @@ public sealed class EmulatorService : IDisposable
         string? stopKey = null;
         int? removeIndex = null;
 
-        var listHeight = Math.Min(260f, Math.Max(94f, friends.Count * 46f + 8f));
+        var listHeight = Math.Min(260f, Math.Max(94f, friends.Count * 30f + 8f));
         ImGui.BeginChild("##synced_friends", new Vector2(0, listHeight), true);
         if (friends.Count == 0)
         {
@@ -1938,6 +1938,7 @@ public sealed class EmulatorService : IDisposable
                 ImGui.TextDisabled("offline");
             }
 
+            ImGui.SameLine();
             ImGui.TextDisabled(friend.Key);
             if (watching)
             {
@@ -2424,25 +2425,32 @@ public sealed class EmulatorService : IDisposable
 
         SynchronizeLiveScreenState();
 
-        // DX11 depth rendering is preferred, but it is not available on
-        // every spectator's game/client configuration. Do not abandon world
-        // screens in that case: the ImGui world overlay remains a functional
-        // fallback for both local and watched streams.
-        if (config.UseDxWorldScreen && dxScreen is { Failed: false })
+        // DX11's retained scene-depth comparison is what lets characters and
+        // objects stand in front of the video. Never silently replace a
+        // failed DX path with an ImGui video overlay: it has no scene depth
+        // and would paint through characters.
+        if (config.UseDxWorldScreen)
         {
-            dxScreen.Enable();
-            if (dxScreen.Enabled && !dxScreen.Failed)
+            if (dxScreen is { Failed: false })
             {
-                DrawDxWorldScreen();
+                dxScreen.Enable();
+                if (dxScreen.Enabled && !dxScreen.Failed)
+                {
+                    DrawDxWorldScreen();
 
-                // Placement overlays still render through ImGui.
-                if (worldScreen.PlacementMode)
-                    worldScreen.Draw();
-                foreach (var renderer in watchScreens.Values)
-                    if (renderer.PlacementMode)
-                        renderer.Draw();
-                return;
+                    // Placement overlays still render through ImGui.
+                    if (worldScreen.PlacementMode)
+                        worldScreen.Draw();
+                    foreach (var renderer in watchScreens.Values)
+                        if (renderer.PlacementMode)
+                            renderer.Draw();
+                    return;
+                }
             }
+
+            // A failed Present hook must not produce an unoccluded in-world
+            // video layer. The settings UI surfaces the failure instead.
+            return;
         }
 
         dxScreen?.Disable();

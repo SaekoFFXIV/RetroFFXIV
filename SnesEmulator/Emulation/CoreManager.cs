@@ -8,7 +8,15 @@ namespace SnesEmulator.Emulation;
 
 public sealed record CoreInfo(string Path, string Name, string Version, string[] Extensions)
 {
-    public string DisplayName => string.IsNullOrEmpty(Version) ? Name : $"{Name} {Version}";
+    // Keep libretro's real identity for loading/configuration, but present
+    // straightforward platform names in the player-facing selector.
+    public string DisplayName => System.IO.Path.GetFileNameWithoutExtension(Path) switch
+    {
+        var file when file.Contains("bsnes", StringComparison.OrdinalIgnoreCase) => "SNES",
+        var file when file.Contains("blastem", StringComparison.OrdinalIgnoreCase) => "Sega",
+        var file when file.Contains("mgba", StringComparison.OrdinalIgnoreCase) => "GBA",
+        _ => string.IsNullOrEmpty(Version) ? Name : $"{Name} {Version}",
+    };
 }
 
 // Discovers libretro core DLLs by scanning the plugin's cores/ subdirectory (and the plugin
