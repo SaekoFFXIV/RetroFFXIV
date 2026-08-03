@@ -87,7 +87,7 @@ anyone's home address.
 | Client → Relay     | `{"action": "presence", "uid": "<persistent_key>", "player_id": "K7QX-4MRT", "name": "…"}` |
 | Relay → Client     | `{"type": "presence_ok"}`                                               |
 | Client → Relay     | `{"action": "list_online"}`                                             |
-| Relay → Client     | `{"type": "online", "players": [{"player_id": "K7QX-4MRT", "name": "…", "live": true}]}` |
+| Relay → Client     | `{"type": "online", "online": [{"player_id": "K7QX-4MRT", "name": "…", "live": true}]}` |
 | Relay → either     | `{"type": "error", "message": "..."}`                                   |
 
 `uid` is the XIVAuth persistent_key (channel identity, used for

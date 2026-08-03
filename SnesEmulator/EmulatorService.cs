@@ -1493,7 +1493,7 @@ public sealed class EmulatorService : IDisposable
                 {
                     ImGui.SameLine();
                     var watching = streamPanel?.IsWatching(key) == true;
-                    if (ImGui.SmallButton(watching ? $"Stop##online_{key}" : $"Watch##online_{key}"))
+                    if (ImGui.SmallButton(watching ? $"Off##online_{key}" : $"On##online_{key}"))
                     {
                         if (watching) stopKey = key;
                         else watchKey = key;
@@ -1598,7 +1598,9 @@ public sealed class EmulatorService : IDisposable
         PollSyncStatus();
 
         // Friend list.
-        ImGui.TextUnformatted($"Synced friends  ({streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} screens)");
+        ImGui.TextUnformatted("Synced friends");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"— watching {streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} streams");
 
         if (config.SyncFriends.Count == 0)
         {
@@ -1637,7 +1639,7 @@ public sealed class EmulatorService : IDisposable
             var watching = streamPanel?.IsWatching(key) == true;
             if (watching)
             {
-                if (ImGui.SmallButton($"Stop##friend{i}"))
+                if (ImGui.SmallButton($"Off##friend{i}"))
                     stopKey = key;
 
                 ImGui.SameLine();
@@ -1652,7 +1654,7 @@ public sealed class EmulatorService : IDisposable
             else
             {
                 ImGui.BeginDisabled(live == null);
-                if (ImGui.SmallButton($"Watch##friend{i}"))
+                if (ImGui.SmallButton($"On##friend{i}"))
                     watchKey = key;
                 ImGui.EndDisabled();
             }
@@ -1938,6 +1940,8 @@ public sealed class EmulatorService : IDisposable
                 ImGui.TextWrapped($"Occlusion: {worldScreen.OcclusionDebug}");
         }
 
+        ImGui.TextWrapped("Your local screen only appears in the world while you are live.");
+
         if (watchScreens.Count > 0)
             ImGui.TextWrapped(
                 "Watched streams get their own screens — use the Screen button in the friend list to place them.");
@@ -1951,18 +1955,22 @@ public sealed class EmulatorService : IDisposable
     {
         if (worldScreen == null) return;
 
-        // Local screen: feed the core's own framebuffer.
-        if (core is { IsGameLoaded: true })
+        // Local screen: it is the in-world broadcast of your stream, so it
+        // only exists while you are live (placement mode always draws).
+        if (worldScreen.PlacementMode || streamPanel is { IsLive: true })
         {
-            var localVer = core.FrameVersion;
-            if (localVer != localScreenVersion && core.TryGetFrame(out var localRgba, out var lw, out var lh))
+            if (core is { IsGameLoaded: true })
             {
-                localScreenVersion = localVer;
-                worldScreen.SetFrame(localRgba, lw, lh);
+                var localVer = core.FrameVersion;
+                if (localVer != localScreenVersion && core.TryGetFrame(out var localRgba, out var lw, out var lh))
+                {
+                    localScreenVersion = localVer;
+                    worldScreen.SetFrame(localRgba, lw, lh);
+                }
             }
-        }
 
-        worldScreen.Draw();
+            worldScreen.Draw();
+        }
 
         if (streamPanel == null) return;
 

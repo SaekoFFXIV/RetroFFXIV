@@ -311,7 +311,7 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
             }
             for p in online.values()
         ]
-        await _safe_send_text(ws, {"type": "online", "players": players})
+        await _safe_send_text(ws, {"type": "online", "online": players})
     elif action == "register":
         uid = msg.get("uid", "")
         if not uid:

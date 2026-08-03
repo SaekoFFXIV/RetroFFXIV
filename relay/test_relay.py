@@ -198,7 +198,7 @@ async def test_presence():
     # Bob sees Alice online, not live.
     await b.send(json.dumps({"action": "list_online"}))
     r = json.loads(await b.recv())
-    players = {p["player_id"]: p for p in r.get("players", [])}
+    players = {p["player_id"]: p for p in r.get("online", [])}
     ok("list_online shows Alice", r.get("type") == "online"
        and ra["player_id"] in players
        and players[ra["player_id"]]["live"] is False
@@ -214,7 +214,7 @@ async def test_presence():
 
     await b.send(json.dumps({"action": "list_online"}))
     r = json.loads(await b.recv())
-    players = {p["player_id"]: p for p in r.get("players", [])}
+    players = {p["player_id"]: p for p in r.get("online", [])}
     ok("list_online shows Alice LIVE", players.get(ra["player_id"], {}).get("live") is True, str(r))
 
     # Alice disconnects; she leaves the online list.
@@ -222,7 +222,7 @@ async def test_presence():
     await asyncio.sleep(0.3)
     await b.send(json.dumps({"action": "list_online"}))
     r = json.loads(await b.recv())
-    players = {p["player_id"]: p for p in r.get("players", [])}
+    players = {p["player_id"]: p for p in r.get("online", [])}
     ok("offline player removed", ra["player_id"] not in players, str(r))
 
     await b.close()

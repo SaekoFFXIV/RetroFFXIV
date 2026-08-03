@@ -201,7 +201,7 @@ public sealed class WorldScreenRenderer
     private (Vector3 tl, Vector3 tr, Vector3 br, Vector3 bl) ComputeQuadCorners(Vector3 center, Vector3 camPos)
     {
         var halfW = config.ScreenWidth / 2f;
-        var halfH = halfW * (9f / 16f);
+        var halfH = halfW * (2f / 3f); // 3:2 screen
 
         var forward = Vector3.Normalize(camPos - center);
         var right = Vector3.Normalize(Vector3.Cross(Vector3.UnitY, forward));
