@@ -38,6 +38,11 @@ public sealed class DxWorldRenderer : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void OMSetRenderTargetsDelegate(IntPtr context, uint numViews, IntPtr rtvs, IntPtr dsv);
 
+    // OMSetRenderTargetsAndUnorderedAccessViews — vtable slot 31.
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void OMSetRTAndUAVsDelegate(IntPtr context, uint numRtvs, IntPtr rtvs, IntPtr dsv,
+        uint uavStart, uint numUavs, IntPtr uavs, IntPtr initialValues);
+
     // ID3D11View::GetResource — vtable slot 4 (after IUnknown + GetDevice).
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate long GetResourceDelegate(IntPtr self, out IntPtr resource);
@@ -66,6 +71,7 @@ public sealed class DxWorldRenderer : IDisposable
 
     private Hook<PresentDelegate>? presentHook;
     private Hook<OMSetRenderTargetsDelegate>? omHook;
+    private Hook<OMSetRTAndUAVsDelegate>? omUavHook;
 
     // Data handed over from the game thread (locked).
     private readonly object frameLock = new();
@@ -93,7 +99,8 @@ public sealed class DxWorldRenderer : IDisposable
     private int backbufferW, backbufferH;
 
     private readonly Dictionary<string, QuadTexture> textures = new();
-    private readonly Dictionary<IntPtr, bool> dsvFullSize = new();
+    private readonly Dictionary<IntPtr, (int W, int H)> dsvSizes = new();
+    private int bestDsvArea;
     private IntPtr capturedDsv;
     private ID3D11DepthStencilView? capturedDsvWrapper;
     private bool? reverseZ;
@@ -104,6 +111,8 @@ public sealed class DxWorldRenderer : IDisposable
     private int loggedErrors;
     private DateTime lastIdleLog = DateTime.MinValue;
     private bool loggedFirstDraw;
+    private long omCalls;
+    private long dsvSeen;
 
     private void LogIdle(string reason)
     {
@@ -163,18 +172,21 @@ public sealed class DxWorldRenderer : IDisposable
             {
                 presentHook.Enable();
                 omHook?.Enable();
+                omUavHook?.Enable();
             }
             return;
         }
 
         try
         {
-            var (presentAddr, omAddr) = FindVtableAddresses();
+            var (presentAddr, omAddr, omUavAddr) = FindVtableAddresses();
             presentHook = interop.HookFromAddress<PresentDelegate>(presentAddr, PresentDetour);
             omHook = interop.HookFromAddress<OMSetRenderTargetsDelegate>(omAddr, OmDetour);
+            omUavHook = interop.HookFromAddress<OMSetRTAndUAVsDelegate>(omUavAddr, OmUavDetour);
             presentHook.Enable();
             omHook.Enable();
-            log.Information("[DxScreen] hooks installed (Present + OMSetRenderTargets)");
+            omUavHook.Enable();
+            log.Information("[DxScreen] hooks installed (Present + OMSetRenderTargets + OMSetRTAndUAVs)");
         }
         catch (Exception ex)
         {
@@ -187,6 +199,7 @@ public sealed class DxWorldRenderer : IDisposable
     {
         presentHook?.Disable();
         omHook?.Disable();
+        omUavHook?.Disable();
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -222,7 +235,7 @@ public sealed class DxWorldRenderer : IDisposable
         ref NativeSwapChainDesc desc, out IntPtr swapChain, out IntPtr device,
         out IntPtr featureLevel, out IntPtr context);
 
-    private static (IntPtr Present, IntPtr OmSetRenderTargets) FindVtableAddresses()
+    private static (IntPtr Present, IntPtr OmSetRenderTargets, IntPtr OmSetRTAndUAVs) FindVtableAddresses()
     {
         // The probe swap chain only needs *some* HWND to read vtables from —
         // reuse the game's main window instead of creating one (window creation
@@ -264,8 +277,9 @@ public sealed class DxWorldRenderer : IDisposable
 
                 var ctxVtable = Marshal.ReadIntPtr(ctxPtr);
                 var om = Marshal.ReadIntPtr(ctxVtable + OMSetRenderTargetsVtableIndex * IntPtr.Size);
+                var omUav = Marshal.ReadIntPtr(ctxVtable + (OMSetRenderTargetsVtableIndex + 1) * IntPtr.Size);
 
-                return (present, om);
+                return (present, om, omUav);
             }
             finally
             {
@@ -309,48 +323,58 @@ public sealed class DxWorldRenderer : IDisposable
     private void OmDetour(IntPtr ctx, uint numViews, IntPtr rtvs, IntPtr dsv)
     {
         omHook!.Original(ctx, numViews, rtvs, dsv);
+        CaptureDsv(numViews, rtvs, dsv);
+    }
 
+    // OMSetRenderTargetsAndUnorderedAccessViews variant; the game may bind
+    // depth through either entry point.
+    private void OmUavDetour(IntPtr ctx, uint numRtvs, IntPtr rtvs, IntPtr dsv,
+        uint uavOffset, uint numUavs, IntPtr uavs, IntPtr samplers)
+    {
+        omUavHook!.Original(ctx, numRtvs, rtvs, dsv, uavOffset, numUavs, uavs, samplers);
+        CaptureDsv(numRtvs, rtvs, dsv);
+    }
+
+    // The scene depth is the largest depth target bound together with a
+    // render target.  Exact backbuffer equality breaks under resolution
+    // scaling, so track the biggest one seen.
+    private void CaptureDsv(uint numViews, IntPtr rtvs, IntPtr dsv)
+    {
+        omCalls++;
         if (dsv == IntPtr.Zero || numViews == 0 || rtvs == IntPtr.Zero)
             return;
 
-        // Capture the depth view that is bound together with a backbuffer-
-        // sized target — that is the scene depth.
-        if (!dsvFullSize.TryGetValue(dsv, out var full))
+        dsvSeen++;
+        if (!dsvSizes.TryGetValue(dsv, out var size))
         {
-            full = QueryDsvFullSize(dsv);
-            dsvFullSize[dsv] = full;
+            size = QueryDsvSize(dsv);
+            dsvSizes[dsv] = size;
         }
 
-        if (full)
+        var area = size.W * size.H;
+        if (area > bestDsvArea)
+        {
+            bestDsvArea = area;
             capturedDsv = dsv;
+        }
     }
 
-    private bool QueryDsvFullSize(IntPtr dsvPtr)
+    private (int W, int H) QueryDsvSize(IntPtr dsvPtr)
     {
         try
         {
             var resPtr = ViewGetResource(dsvPtr);
             if (resPtr == IntPtr.Zero)
-                return false;
+                return (0, 0);
             using var resource = new ID3D11Resource(resPtr); // owns the GetResource reference
             var texture = resource.QueryInterface<ID3D11Texture2D>();
             var desc = texture.Description;
             texture.Dispose();
-
-            int bbW, bbH;
-            lock (frameLock)
-            {
-                bbW = backbufferW;
-                bbH = backbufferH;
-            }
-
-            if (bbW > 0)
-                return desc.Width == bbW && desc.Height == bbH;
-            return desc.Width >= 1280;
+            return (desc.Width, desc.Height);
         }
         catch
         {
-            return false;
+            return (0, 0);
         }
     }
 
@@ -446,7 +470,7 @@ public sealed class DxWorldRenderer : IDisposable
             var dsvPtr = capturedDsv;
             if (dsvPtr == IntPtr.Zero)
             {
-                LogIdle("no scene depth captured");
+                LogIdle($"no scene depth captured (om calls: {omCalls}, dsvs seen: {dsvSeen})");
                 return;
             }
 
@@ -934,8 +958,10 @@ float4 main(PS_IN i) : SV_TARGET
         Disable();
         presentHook?.Dispose();
         omHook?.Dispose();
+        omUavHook?.Dispose();
         presentHook = null;
         omHook = null;
+        omUavHook = null;
 
         foreach (var qt in textures.Values)
             qt.Dispose();
