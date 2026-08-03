@@ -700,9 +700,10 @@ public sealed class DxWorldRenderer : IDisposable
         {
             var quad = drawQuads[q];
 
-            // Camera-facing billboard axes from the view-proj rows.
-            var right = new Vector3(vp.M11, vp.M21, vp.M31);
-            var up = new Vector3(vp.M12, vp.M22, vp.M32);
+            // Camera-facing billboard axes from the view-proj rows
+            // (column-vector convention: row 1 = right, row 2 = up).
+            var right = new Vector3(vp.M11, vp.M12, vp.M13);
+            var up = new Vector3(vp.M21, vp.M22, vp.M23);
             if (right.LengthSquared() > 1e-8f) right = Vector3.Normalize(right);
             if (up.LengthSquared() > 1e-8f) up = Vector3.Normalize(up);
 

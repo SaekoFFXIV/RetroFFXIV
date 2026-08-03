@@ -86,7 +86,9 @@ done:
 
     private static bool Project(Matrix4x4 m, Vector3 p, Vector2 displaySize, out Vector2 screen)
     {
-        var clip = Vector4.Transform(new Vector4(p, 1f), m);
+        // DLT solves column-vector convention (clip = m·p); Numerics Transform
+        // is row-vector, so transpose.
+        var clip = Vector4.Transform(new Vector4(p, 1f), Matrix4x4.Transpose(m));
         if (MathF.Abs(clip.W) < 1e-6f)
         {
             screen = Vector2.Zero;
