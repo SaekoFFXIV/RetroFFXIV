@@ -1677,11 +1677,29 @@ public sealed class EmulatorService : IDisposable
     private void DrawFriendsTab()
     {
         PollSyncStatus();
+        DrawOnlinePlayerCount();
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
         DrawShareablePlayerId();
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
         DrawFriendRoster();
+    }
+
+    private void DrawOnlinePlayerCount()
+    {
+        var onlineCount = presence?.OnlineCount ?? 0;
+        ImGui.TextColored(new Vector4(0.25f, 0.82f, 0.95f, 1f), $"{onlineCount}");
+        ImGui.SameLine();
+        ImGui.TextUnformatted(onlineCount == 1 ? "player online" : "players online");
+
+        if (presence is { IsConnected: false })
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("(connecting...)");
+        }
     }
 
     private void DrawNetplaySection()

@@ -39,6 +39,13 @@ public sealed class RelayPresence : IDisposable
             return online.ToList();
     }
 
+    // The Friends tab needs the global presence total every frame. Avoid
+    // cloning the online roster just to display that one number.
+    public int OnlineCount
+    {
+        get { lock (stateLock) { return online.Count; } }
+    }
+
     // Idempotent: a no-op while running with the same identity/relay.
     public void Start(string relayUrl, string uid, string playerId, string name)
     {
