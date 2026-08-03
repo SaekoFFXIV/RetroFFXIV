@@ -186,6 +186,18 @@ public sealed class StreamHost : IDisposable
                 {
                     encoder.ForceKeyFrame();
                     nextKeyframe = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+
+                    // Re-send stream info with each keyframe so late
+                    // subscribers can initialise format + audio.
+                    if (ws is { State: WebSocketState.Open })
+                    {
+                        var info = StreamProtocol.PackStreamInfo(
+                            backend.BaseWidth * StreamScale,
+                            backend.BaseHeight * StreamScale,
+                            StreamFps,
+                            (int)backend.SampleRate);
+                        await SendBinaryAsync(info, token);
+                    }
                 }
 
                 var upscaled = Upscale(rgba, srcW, srcH, dstW, dstH);

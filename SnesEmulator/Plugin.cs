@@ -76,6 +76,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             emulator.SetFocused(false);
             emulator.SetWindowOpen(false);
+            // World screens live independently of the control deck.
+            emulator.DrawWorldScreen();
             return;
         }
 

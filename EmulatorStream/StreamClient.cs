@@ -59,6 +59,10 @@ public sealed class StreamClient : IDisposable
             audioOutput = null;
             audioBuffer = null;
         }
+        else if (audioOutput == null && IsConnected)
+        {
+            InitAudio(sampleRate);
+        }
     }
 
     public async Task DisconnectAsync()
