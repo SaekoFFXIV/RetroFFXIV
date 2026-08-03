@@ -125,6 +125,11 @@ public sealed class ControlMsg
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Collections.Generic.List<LivePlayerInfo>? Live { get; set; }
 
+    // Presence fields.
+    [JsonPropertyName("online")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public System.Collections.Generic.List<OnlinePlayerInfo>? Online { get; set; }
+
     [JsonPropertyName("subscribers")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Subscribers { get; set; }
@@ -157,4 +162,16 @@ public sealed class LivePlayerInfo
 
     [JsonPropertyName("viewers")]
     public int Viewers { get; set; }
+}
+
+public sealed class OnlinePlayerInfo
+{
+    [JsonPropertyName("player_id")]
+    public string PlayerId { get; set; } = "";
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    [JsonPropertyName("live")]
+    public bool Live { get; set; }
 }

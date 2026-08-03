@@ -81,6 +81,14 @@ def generate_player_id() -> str:
 
 
 @dataclass
+class OnlinePlayer:
+    uid: str
+    player_id: str          # dash-formatted ID for display
+    name: str
+    ws: WebSocket
+
+
+@dataclass
 class NetplayPlayer:
     uid: str            # persistent unique ID (UUID from the plugin config)
     ws: WebSocket
@@ -114,6 +122,9 @@ netplay_connections: dict[WebSocket, NetplayRoom] = {}
 # Persisted to RELAY_REGISTRY_PATH so IDs survive restarts.
 registry: dict[str, dict] = {}
 registry_by_id: dict[str, str] = {}  # normalized player ID → uid
+
+# Presence: registered players with an open presence connection.
+online: dict[str, OnlinePlayer] = {}  # normalized player ID → player
 
 
 def load_registry() -> None:
@@ -183,6 +194,12 @@ async def _teardown_channel(uid: str, notify: bool = True) -> None:
 
 
 def remove_connection(ws: WebSocket) -> None:
+    # Presence socket?
+    online_pid = next((pid for pid, p in online.items() if p.ws is ws), None)
+    if online_pid is not None:
+        player = online.pop(online_pid)
+        log.info("online %s left (%d online)", player.player_id, len(online))
+
     # Check live channel subscriptions first.
     sub_uid = live_subscriptions.pop(ws, None)
     if sub_uid is not None:
@@ -278,7 +295,24 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
 
     action = msg.get("action")
 
-    if action == "register":
+    if action == "presence":
+        uid = msg.get("uid", "")
+        player_id = normalize_player_id(msg.get("player_id", ""))
+        if not uid or not player_id:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing uid or player_id"})
+            return
+        await _handle_presence(ws, uid, player_id, msg.get("name", ""))
+    elif action == "list_online":
+        players = [
+            {
+                "player_id": p.player_id,
+                "name": p.name,
+                "live": p.uid in live_channels,
+            }
+            for p in online.values()
+        ]
+        await _safe_send_text(ws, {"type": "online", "players": players})
+    elif action == "register":
         uid = msg.get("uid", "")
         if not uid:
             await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
@@ -395,6 +429,20 @@ async def _handle_join_netplay(ws: WebSocket, code: str, uid: str) -> None:
         asyncio.create_task(_safe_send_text(p.ws, {
             "type": "netplay_players", "players": roster,
         }))
+
+
+async def _handle_presence(ws: WebSocket, uid: str, player_id: str, name: str) -> None:
+    # Only registered identities may appear in the online list.
+    entry = registry.get(uid)
+    if entry is None or normalize_player_id(entry["player_id"]) != player_id:
+        await _safe_send_text(ws, {"type": "error", "message": "Not registered"})
+        return
+
+    online[player_id] = OnlinePlayer(
+        uid=uid, player_id=entry["player_id"],
+        name=name or entry.get("name", ""), ws=ws)
+    log.info("online %s joined (%d online)", entry["player_id"], len(online))
+    await _safe_send_text(ws, {"type": "presence_ok"})
 
 
 async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,

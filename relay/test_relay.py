@@ -168,6 +168,66 @@ async def test_registration_and_live():
     await checker.close()
 
 
+async def test_presence():
+    print("\n── Presence (online list) ──")
+
+    a = await websockets.connect(RELAY)
+    b = await websockets.connect(RELAY)
+
+    ra = await register(a, "presence-uid-aaaa", "Alice")
+    await register(b, "presence-uid-bbbb", "Bob")
+
+    # Presence for an unregistered identity is rejected.
+    c = await websockets.connect(RELAY)
+    await c.send(json.dumps({
+        "action": "presence", "uid": "unregistered-uid",
+        "player_id": "ZZZZ-9999", "name": "Eve",
+    }))
+    r = json.loads(await c.recv())
+    ok("presence without registration rejected", r.get("type") == "error", str(r))
+    await c.close()
+
+    # Alice connects presence.
+    await a.send(json.dumps({
+        "action": "presence", "uid": "presence-uid-aaaa",
+        "player_id": ra["player_id"], "name": "Alice",
+    }))
+    r = json.loads(await a.recv())
+    ok("presence ack", r.get("type") == "presence_ok", str(r))
+
+    # Bob sees Alice online, not live.
+    await b.send(json.dumps({"action": "list_online"}))
+    r = json.loads(await b.recv())
+    players = {p["player_id"]: p for p in r.get("players", [])}
+    ok("list_online shows Alice", r.get("type") == "online"
+       and ra["player_id"] in players
+       and players[ra["player_id"]]["live"] is False
+       and players[ra["player_id"]]["name"] == "Alice", str(r))
+
+    # Alice goes live; the live flag flips.
+    await a.send(json.dumps({
+        "action": "go_live", "uid": "presence-uid-aaaa",
+        "player_id": ra["player_id"], "name": "Alice",
+    }))
+    r = json.loads(await a.recv())
+    ok("alice goes live", r.get("type") == "live_started", str(r))
+
+    await b.send(json.dumps({"action": "list_online"}))
+    r = json.loads(await b.recv())
+    players = {p["player_id"]: p for p in r.get("players", [])}
+    ok("list_online shows Alice LIVE", players.get(ra["player_id"], {}).get("live") is True, str(r))
+
+    # Alice disconnects; she leaves the online list.
+    await a.close()
+    await asyncio.sleep(0.3)
+    await b.send(json.dumps({"action": "list_online"}))
+    r = json.loads(await b.recv())
+    players = {p["player_id"]: p for p in r.get("players", [])}
+    ok("offline player removed", ra["player_id"] not in players, str(r))
+
+    await b.close()
+
+
 async def test_netplay():
     print("\n── Netplay ──")
 
@@ -239,6 +299,7 @@ async def main():
 
     try:
         await test_registration_and_live()
+        await test_presence()
         await test_netplay()
     except ConnectionRefusedError:
         print("\n✗ Cannot connect to relay — is it running?  (python server.py)")

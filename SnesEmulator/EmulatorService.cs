@@ -102,6 +102,10 @@ public sealed class EmulatorService : IDisposable
     private bool playerRegistering;
     private string? playerRegError;
     private DateTime lastRegisterAttempt = DateTime.MinValue;
+    private DateTime idCopiedUntil = DateTime.MinValue;
+
+    // Relay presence (who is online).
+    private RelayPresence? presence;
 
     private RetroCore? core;
     private AudioPlayer? audio;
@@ -167,6 +171,7 @@ public sealed class EmulatorService : IDisposable
             msg => log.Information("[Stream] {Msg}", msg),
             () => core,
             () => pluginInterface.SavePluginConfig(config));
+        presence = new RelayPresence(msg => log.Information("[Presence] {Msg}", msg));
         netplayPanel = new NetplayPanel(
             config,
             msg => log.Information("[Netplay] {Msg}", msg),
@@ -1393,6 +1398,118 @@ public sealed class EmulatorService : IDisposable
     private string syncIdInput = string.Empty;
     private string syncNameInput = string.Empty;
 
+    // PlayerSync-style card at the top of the Sync tab: the registered
+    // player ID in neon, click anywhere on the card to copy it.
+    private void DrawPlayerIdCard(bool registered)
+    {
+        const float cardH = 64f;
+        const uint DimText = 0xFF7A6A8A;
+
+        var availW = ImGui.GetContentRegionAvail().X;
+        var p = ImGui.GetCursorScreenPos();
+        var dl = ImGui.GetWindowDrawList();
+
+        dl.AddRectFilled(p, p + new Vector2(availW, cardH), DeckBody, 6f);
+        dl.AddRect(p + new Vector2(1, 1), p + new Vector2(availW - 1, cardH - 1), ShellHighlight, 5f);
+
+        if (registered)
+        {
+            var copied = DateTime.UtcNow < idCopiedUntil;
+            CenteredText(dl, p + new Vector2(0, 9), availW, 14,
+                copied ? "Copied to clipboard!" : "PLAYER ID", copied ? NeonCyan : DimText);
+            CenteredText(dl, p + new Vector2(0, 27), availW, 24, config.PlayerId, NeonCyan);
+
+            ImGui.SetCursorScreenPos(p);
+            if (ImGui.InvisibleButton("##idcopy", new Vector2(availW, cardH)))
+            {
+                ImGui.SetClipboardText(config.PlayerId);
+                idCopiedUntil = DateTime.UtcNow.AddSeconds(1.5);
+            }
+        }
+        else if (!xivAuth.IsLoggedIn)
+        {
+            CenteredText(dl, p + new Vector2(0, 14), availW, 14, "PLAYER ID", DimText);
+            CenteredText(dl, p + new Vector2(0, 34), availW, 14, "Log in with XIVAuth to get yours", DimText);
+        }
+        else
+        {
+            CenteredText(dl, p + new Vector2(0, 14), availW, 14, "PLAYER ID", DimText);
+            CenteredText(dl, p + new Vector2(0, 34), availW, 14,
+                playerRegistering ? "Registering with the relay..." : "Not registered yet", DimText);
+        }
+
+        ImGui.Dummy(new Vector2(availW, cardH));
+    }
+
+    // Who is online right now (relay presence), with LIVE badges and a
+    // one-click Watch for live players.  Synced friends get a star.
+    private void DrawOnlineSection()
+    {
+        if (presence == null)
+            return;
+
+        var list = presence.GetOnline();
+
+        ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), $"{list.Count}");
+        ImGui.SameLine();
+        ImGui.TextUnformatted(list.Count == 1 ? "player online" : "players online");
+        if (!presence.IsConnected)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("(connecting...)");
+        }
+
+        if (list.Count == 0)
+            return;
+
+        ImGui.Spacing();
+        ImGui.BeginChild("##online", new Vector2(0, Math.Min(160, list.Count * 22 + 8)), false);
+
+        string? watchKey = null;
+        string? stopKey = null;
+
+        foreach (var player in list)
+        {
+            var key = StreamPanel.NormalizeId(player.PlayerId);
+            var isSelf = key == StreamPanel.NormalizeId(config.PlayerId);
+            var isFriend = config.SyncFriends.Any(f => StreamPanel.NormalizeId(f.Key) == key);
+
+            if (isFriend)
+                ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), "*");
+            else
+                ImGui.TextUnformatted(" ");
+            ImGui.SameLine();
+
+            ImGui.TextUnformatted(string.IsNullOrEmpty(player.Name) ? key : player.Name);
+            ImGui.SameLine();
+            ImGui.TextDisabled(key);
+
+            if (player.Live)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), "LIVE");
+
+                if (!isSelf)
+                {
+                    ImGui.SameLine();
+                    var watching = streamPanel?.IsWatching(key) == true;
+                    if (ImGui.SmallButton(watching ? $"Stop##online_{key}" : $"Watch##online_{key}"))
+                    {
+                        if (watching) stopKey = key;
+                        else watchKey = key;
+                    }
+                }
+            }
+        }
+
+        ImGui.EndChild();
+
+        if (watchKey != null && streamPanel != null)
+            watchError = streamPanel.TryWatch(watchKey, out var err) ? null : err;
+        if (stopKey != null)
+            streamPanel?.StopWatching(stopKey);
+    }
+
     private void DrawSyncSection()
     {
         ImGui.TextUnformatted("Sync");
@@ -1402,34 +1519,34 @@ public sealed class EmulatorService : IDisposable
             && !string.IsNullOrEmpty(config.PlayerId)
             && config.PlayerIdUid == uid;
 
-        // Player ID registration (tied to the XIVAuth account).
+        DrawPlayerIdCard(registered);
+        ImGui.Spacing();
+
         if (registered)
         {
-            ImGui.TextUnformatted("Your Player ID:");
-            ImGui.SameLine();
-            ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), config.PlayerId);
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Copy"))
-                ImGui.SetClipboardText(config.PlayerId);
-            ImGui.TextWrapped("Tied to this character's XIVAuth account. Share it with friends so they can watch you.");
-        }
-        else if (!xivAuth.IsLoggedIn)
-        {
-            ImGui.TextWrapped("Log in with XIVAuth above to register your player ID and go live. Watching friends needs no login.");
+            presence?.Start(
+                streamPanel?.RelayUrl ?? config.RelayUrl,
+                uid, config.PlayerId, config.PlayerCharacterName);
+            DrawOnlineSection();
         }
         else
         {
-            TryRegisterPlayerId(auto: true);
-            if (playerRegistering)
+            presence?.Stop();
+
+            if (xivAuth.IsLoggedIn)
             {
-                ImGui.TextWrapped("Registering your player ID with the relay...");
+                TryRegisterPlayerId(auto: true);
+                if (!playerRegistering && !string.IsNullOrEmpty(playerRegError))
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"Registration failed: {playerRegError}");
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("Retry"))
+                        TryRegisterPlayerId(auto: false);
+                }
             }
             else
             {
-                if (!string.IsNullOrEmpty(playerRegError))
-                    ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), $"Registration failed: {playerRegError}");
-                if (ImGui.Button("Register player ID"))
-                    TryRegisterPlayerId(auto: false);
+                ImGui.TextWrapped("Watching friends needs no login.");
             }
         }
 
@@ -1889,6 +2006,8 @@ public sealed class EmulatorService : IDisposable
         xivAuth.Dispose();
         streamPanel?.Dispose();
         streamPanel = null;
+        presence?.Dispose();
+        presence = null;
         netplayPanel?.Dispose();
         netplayPanel = null;
         worldScreen?.Dispose();
