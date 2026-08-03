@@ -212,9 +212,19 @@ public sealed class DxWorldRenderer : IDisposable
 
     private static (IntPtr Present, IntPtr OmSetRenderTargets) FindVtableAddresses()
     {
-        var hwnd = CreateWindowExW(0, "STATIC", "dxprobe", 0, 0, 0, 8, 8, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        // The probe swap chain only needs *some* HWND to read vtables from —
+        // reuse the game's main window instead of creating one (window creation
+        // from the render thread failed inside the game process).
+        var hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+        var createdHwnd = false;
         if (hwnd == IntPtr.Zero)
-            throw new InvalidOperationException("probe window failed");
+        {
+            hwnd = CreateWindowExW(0, "STATIC", "dxprobe", 0, 0, 0, 8, 8, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            createdHwnd = hwnd != IntPtr.Zero;
+        }
+
+        if (hwnd == IntPtr.Zero)
+            throw new InvalidOperationException($"probe window failed: win32 error {Marshal.GetLastWin32Error()}");
 
         try
         {
@@ -254,7 +264,8 @@ public sealed class DxWorldRenderer : IDisposable
         }
         finally
         {
-            DestroyWindow(hwnd);
+            if (createdHwnd)
+                DestroyWindow(hwnd);
         }
     }
 
