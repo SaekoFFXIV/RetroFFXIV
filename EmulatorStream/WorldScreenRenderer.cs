@@ -108,10 +108,15 @@ public sealed class WorldScreenRenderer
         var playerPos = getPlayerPos();
         if (playerPos == null) return;
 
-        // Preview position: 3 yalms in front of the player at eye height.
+        // Preview follows the mouse raycast into the world; fall back to
+        // 3 yalms in front of the player when the ray hits nothing.
         var yaw = getPlayerRot();
         var forward = new Vector3((float)Math.Sin(yaw), 0, (float)Math.Cos(yaw));
         var previewPos = playerPos.Value + forward * 3f + new Vector3(0, config.ScreenHeight, 0);
+
+        var mouse = ImGui.GetIO().MousePos;
+        if (gameGui.ScreenToWorld(mouse, out var hit, 60f))
+            previewPos = hit;
 
         // Draw the preview quad in the world.
         DrawWorldQuad(previewPos, 0x80FFFFFF);

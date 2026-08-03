@@ -100,6 +100,16 @@ public sealed class DxWorldRenderer : IDisposable
     private bool resourcesReady;
     private bool failed;
     private int loggedErrors;
+    private DateTime lastIdleLog = DateTime.MinValue;
+    private bool loggedFirstDraw;
+
+    private void LogIdle(string reason)
+    {
+        if ((DateTime.UtcNow - lastIdleLog).TotalSeconds < 3)
+            return;
+        lastIdleLog = DateTime.UtcNow;
+        log.Information($"[DxScreen] idle: {reason}");
+    }
 
     private sealed class QuadTexture : IDisposable
     {
@@ -393,8 +403,13 @@ public sealed class DxWorldRenderer : IDisposable
         Dictionary<string, (byte[] Rgba, int W, int H)> frames;
         lock (frameLock)
         {
-            if (!hasViewProj || quads.Count == 0)
+            if (quads.Count == 0)
                 return;
+            if (!hasViewProj)
+            {
+                LogIdle("camera estimation failing");
+                return;
+            }
             vp = viewProj;
             drawQuads = quads;
             frames = new Dictionary<string, (byte[], int, int)>(pendingFrames.Count);
@@ -417,13 +432,19 @@ public sealed class DxWorldRenderer : IDisposable
 
             RefreshBackbuffer(currentChain);
             if (backbufferView == null)
+            {
+                LogIdle("no backbuffer");
                 return;
+            }
 
             UploadFrames(frames);
 
             var dsvPtr = capturedDsv;
             if (dsvPtr == IntPtr.Zero)
+            {
+                LogIdle("no scene depth captured");
                 return;
+            }
 
             if (capturedDsvWrapper == null || capturedDsvWrapper.NativePointer != dsvPtr)
             {
@@ -435,6 +456,12 @@ public sealed class DxWorldRenderer : IDisposable
 
             if (reverseZ == null)
                 DetectReverseZ();
+
+            if (!loggedFirstDraw)
+            {
+                loggedFirstDraw = true;
+                log.Information($"[DxScreen] first draw ({drawQuads.Count} quads, reverseZ={reverseZ})");
+            }
 
             DrawQuads(drawQuads, vp);
         }
@@ -705,7 +732,7 @@ public sealed class DxWorldRenderer : IDisposable
             vmapHandle.Free();
         }
 
-        var cb = new Constants { ViewProj = vp };
+        var cb = new Constants { ViewProj = Matrix4x4.Transpose(vp) }; // HLSL mul(M,v) is column-major
         ctx.Map(constantBuffer!, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None, out var cmap);
         Marshal.StructureToPtr(cb, cmap.DataPointer, false);
         ctx.Unmap(constantBuffer!, 0);
