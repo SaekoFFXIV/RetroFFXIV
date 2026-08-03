@@ -46,7 +46,7 @@ public sealed class DxWorldRenderer : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate long GetBufferDelegate(IntPtr self, uint buffer, ref Guid riid, out IntPtr surface);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowExW(int exStyle, string className, string windowName, int style,
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
 
@@ -387,7 +387,7 @@ public sealed class DxWorldRenderer : IDisposable
             {
                 failed = true;
                 if (loggedErrors++ < 3)
-                    log.Error($"[DxScreen] present draw failed, disabling: {ex.Message}");
+                    log.Error($"[DxScreen] present draw failed, disabling: {ex}");
             }
         }
 
@@ -613,7 +613,9 @@ public sealed class DxWorldRenderer : IDisposable
                 qt.H = h;
             }
 
-            context!.Map(qt.Texture!, 0, MapMode.Write, Vortice.Direct3D11.MapFlags.None, out var mapped);
+            context!.Map(qt.Texture!, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None, out var mapped);
+            if (mapped.DataPointer == IntPtr.Zero)
+                throw new InvalidOperationException("texture map returned null pointer");
             try
             {
                 for (var y = 0; y < h; y++)
@@ -804,6 +806,8 @@ public sealed class DxWorldRenderer : IDisposable
             using var staging = device!.CreateTexture2D(stagingDesc);
             context!.CopySubresourceRegion(depthTex, 0, x, y, 0, staging, 0);
             context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None, out var mapped);
+            if (mapped.DataPointer == IntPtr.Zero)
+                return null;
             try
             {
                 var raw = Marshal.ReadInt32(mapped.DataPointer);
