@@ -147,19 +147,26 @@ async def test_registration_and_live():
     # Host sends fake stream info + video + audio.
     fake_video = bytes([0x01]) + b"\x00\x00\x00\x01fake-h264-nal"
     fake_audio = bytes([0x02]) + struct.pack("<4h", 100, -100, 200, -200)
-    fake_info  = bytes([0x03]) + json.dumps({"width": 768, "height": 672, "fps": 30, "sample_rate": 32000}).encode()
+    fake_info  = bytes([0x03]) + json.dumps({"width": 768, "height": 672, "fps": 30,
+                                             "sample_rate": 48000, "audio_codec": "opus"}).encode()
+    # Opus chunk: TLV of [2-byte LE packet length][packet bytes].
+    fake_opus  = bytes([0x05]) + struct.pack("<H", 4) + b"\xde\xad\xbe\xef" \
+                             + struct.pack("<H", 2) + b"\xca\xfe"
 
     await host.send(fake_info)
     await host.send(fake_video)
     await host.send(fake_audio)
+    await host.send(fake_opus)
 
     got_info  = await spec.recv()
     got_video = await spec.recv()
     got_audio = await spec.recv()
+    got_opus  = await spec.recv()
 
     ok("spectator gets stream info", isinstance(got_info, bytes) and got_info[0] == 0x03)
     ok("spectator gets video",       isinstance(got_video, bytes) and got_video == fake_video)
     ok("spectator gets audio",       isinstance(got_audio, bytes) and got_audio == fake_audio)
+    ok("spectator gets opus audio",  isinstance(got_opus, bytes) and got_opus == fake_opus)
 
     # Spectator's binary should be ignored (only the host fans out).
     await spec.send(bytes([0x01]) + b"should-be-ignored")

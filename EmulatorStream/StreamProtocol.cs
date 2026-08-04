@@ -9,8 +9,10 @@ namespace EmulatorStream;
 //
 // Binary messages: [1-byte type][payload]
 //   0x01 = H.264 access unit (one video frame, Annex B)
-//   0x02 = Audio chunk (int16 stereo PCM, little-endian)
-//   0x03 = Stream info (UTF-8 JSON: width, height, fps, sample_rate)
+//   0x02 = Audio chunk (int16 stereo PCM, little-endian) — legacy hosts
+//   0x03 = Stream info (UTF-8 JSON: width, height, fps, sample_rate, audio_codec)
+//   0x04 = Netplay lockstep input (8 bytes, routed within netplay rooms only)
+//   0x05 = Opus audio chunk: repeated [2-byte LE packet length][Opus packet]
 //
 // Text messages: JSON control plane (see relay/server.py for the full table).
 public static class StreamProtocol
@@ -18,6 +20,10 @@ public static class StreamProtocol
     public const byte MsgVideo = 0x01;
     public const byte MsgAudio = 0x02;
     public const byte MsgStreamInfo = 0x03;
+    public const byte MsgAudioOpus = 0x05;
+
+    public const string AudioCodecPcm = "pcm";
+    public const string AudioCodecOpus = "opus";
 
     public static byte[] PackVideo(ReadOnlySpan<byte> h264)
     {
@@ -35,7 +41,16 @@ public static class StreamProtocol
         return buf;
     }
 
-    public static byte[] PackStreamInfo(int width, int height, double fps, int sampleRate)
+    // Payload is already TLV-framed: [2-byte LE length][Opus packet] ...
+    public static byte[] PackAudioOpus(ReadOnlySpan<byte> tlv)
+    {
+        var buf = new byte[1 + tlv.Length];
+        buf[0] = MsgAudioOpus;
+        tlv.CopyTo(buf.AsSpan(1));
+        return buf;
+    }
+
+    public static byte[] PackStreamInfo(int width, int height, double fps, int sampleRate, string audioCodec)
     {
         var json = JsonSerializer.SerializeToUtf8Bytes(new StreamInfoMsg
         {
@@ -43,6 +58,7 @@ public static class StreamProtocol
             Height = height,
             Fps = fps,
             SampleRate = sampleRate,
+            AudioCodec = audioCodec,
         });
         var buf = new byte[1 + json.Length];
         buf[0] = MsgStreamInfo;
@@ -69,6 +85,10 @@ public sealed class StreamInfoMsg
 
     [JsonPropertyName("sample_rate")]
     public int SampleRate { get; set; }
+
+    // "opus" or "pcm".  Absent on legacy hosts — treat as "pcm".
+    [JsonPropertyName("audio_codec")]
+    public string? AudioCodec { get; set; }
 }
 
 // JSON control messages (text WebSocket frames).

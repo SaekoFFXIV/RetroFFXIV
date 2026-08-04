@@ -190,6 +190,7 @@ async def _teardown_channel(uid: str, notify: bool = True) -> None:
     if channels_by_player_id.get(channel.player_id) is channel:
         channels_by_player_id.pop(channel.player_id, None)
     for sub in list(channel.subscribers):
+        _stop_subscriber_sender(sub)
         if notify:
             asyncio.create_task(_safe_send_text(sub, {"type": "live_ended", "uid": uid}))
         live_subscriptions.pop(sub, None)
@@ -205,6 +206,7 @@ def remove_connection(ws: WebSocket) -> None:
     # Check live channel subscriptions first.
     sub_uid = live_subscriptions.pop(ws, None)
     if sub_uid is not None:
+        _stop_subscriber_sender(ws)
         channel = live_channels.get(sub_uid)
         if channel is not None:
             channel.subscribers.discard(ws)
@@ -253,12 +255,61 @@ async def _safe_send_bytes(ws: WebSocket, data: bytes) -> None:
         pass
 
 
+# Per-subscriber send queues.  The fan-out hot path only enqueues; one
+# sender task per subscriber drains its queue.  The bounded queue with
+# drop-oldest keeps a single slow consumer from stalling the fan-out or
+# ballooning relay memory — the video recovers at the next keyframe.
+SUBSCRIBER_QUEUE_MAX = 32
+
+subscriber_queues: dict[WebSocket, asyncio.Queue] = {}
+subscriber_tasks: dict[WebSocket, asyncio.Task] = {}
+
+
+async def _subscriber_sender_loop(ws: WebSocket, q: asyncio.Queue) -> None:
+    while True:
+        data = await q.get()
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            break
+
+
+def _start_subscriber_sender(ws: WebSocket) -> None:
+    if ws in subscriber_queues:
+        return
+    q: asyncio.Queue = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
+    subscriber_queues[ws] = q
+    subscriber_tasks[ws] = asyncio.create_task(_subscriber_sender_loop(ws, q))
+
+
+def _stop_subscriber_sender(ws: WebSocket) -> None:
+    subscriber_queues.pop(ws, None)
+    task = subscriber_tasks.pop(ws, None)
+    if task is not None:
+        task.cancel()
+
+
+def _enqueue_to_subscriber(ws: WebSocket, data: bytes) -> None:
+    q = subscriber_queues.get(ws)
+    if q is None:
+        return
+    try:
+        q.put_nowait(data)
+    except asyncio.QueueFull:
+        try:
+            q.get_nowait()
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
+
+
 @app.get("/health")
 async def health():
     return {
         "registered_players": len(registry),
         "netplay_rooms": len(netplay_rooms),
         "live_channels": len(live_channels),
+        "subscriber_queue_backlog": sum(q.qsize() for q in subscriber_queues.values()),
     }
 
 
@@ -578,6 +629,7 @@ async def _handle_subscribe(ws: WebSocket, player_id: str) -> None:
 
     channel.subscribers.add(ws)
     live_subscriptions[ws] = channel.uid
+    _start_subscriber_sender(ws)
     log.info("live %s subscriber joined (%d total)",
              channel.display_id, len(channel.subscribers))
     await _safe_send_text(ws, {
@@ -597,6 +649,7 @@ async def _handle_unsubscribe(ws: WebSocket) -> None:
     uid = live_subscriptions.pop(ws, None)
     if uid is None:
         return
+    _stop_subscriber_sender(ws)
     channel = live_channels.get(uid)
     if channel is not None:
         channel.subscribers.discard(ws)
@@ -630,7 +683,7 @@ async def _handle_binary(ws: WebSocket, data: bytes) -> None:
     if live_uid is not None:
         channel = live_channels[live_uid]
         for sub in list(channel.subscribers):
-            asyncio.create_task(_safe_send_bytes(sub, data))
+            _enqueue_to_subscriber(sub, data)
         return
 
     # Netplay room: route to all OTHER players.

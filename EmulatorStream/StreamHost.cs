@@ -1,6 +1,8 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,8 +17,19 @@ public sealed class StreamHost : IDisposable
 {
     private const int StreamScale = 3;
     private const float StreamFps = 30f;
-    private const int TargetBitrate = 2_000_000; // 2 Mbps
-    private const int AudioChunkFrames = 1600;   // ~50 ms at 32 kHz
+
+    // Sized for ~600+ concurrent spectators over a 1 Gbps relay uplink
+    // (~1.6 Mbps budget per viewer, worst case).
+    private const int TargetBitrate = 1_200_000; // 1.2 Mbps
+
+    private const int AudioChunkFrames = 3200;   // ~100 ms at 32 kHz
+
+    // Opus stream audio: 48 kHz stereo at 64 Kbps replaces the raw PCM
+    // (~1 Mbps) with ~0.06 Mbps.  Opus frame size is fixed at 20 ms.
+    public const int OpusSampleRate = 48000;
+    private const int OpusChannels = 2;
+    private const int OpusBitrate = 64_000;
+    private const int OpusFrameSamples = 960;    // 20 ms at 48 kHz
 
     private readonly IEmulatorBackend backend;
     private readonly string relayUrl;
@@ -24,6 +37,8 @@ public sealed class StreamHost : IDisposable
 
     private ClientWebSocket? ws;
     private H264Encoder? encoder;
+    private OpusEncoder? opusEncoder;
+    private string audioCodec = StreamProtocol.AudioCodecOpus;
     private CancellationTokenSource? cts;
     private Task? sendLoop;
     private Task? audioLoop;
@@ -111,11 +126,25 @@ public sealed class StreamHost : IDisposable
 
         StateChanged?.Invoke();
 
+        // Decide the audio codec up front so the stream info is accurate.
+        try
+        {
+            opusEncoder = new OpusEncoder(OpusSampleRate, OpusChannels, OpusBitrate);
+            audioCodec = StreamProtocol.AudioCodecOpus;
+        }
+        catch (Exception ex)
+        {
+            opusEncoder = null;
+            audioCodec = StreamProtocol.AudioCodecPcm;
+            log($"Opus unavailable ({ex.Message}) — streaming audio as raw PCM");
+        }
+
         var info = StreamProtocol.PackStreamInfo(
             backend.BaseWidth * StreamScale,
             backend.BaseHeight * StreamScale,
             StreamFps,
-            (int)backend.SampleRate);
+            audioCodec == StreamProtocol.AudioCodecOpus ? OpusSampleRate : (int)backend.SampleRate,
+            audioCodec);
         await SendBinaryAsync(info, token);
 
         sendLoop = Task.Run(() => VideoLoopAsync(token), token);
@@ -240,7 +269,8 @@ public sealed class StreamHost : IDisposable
                             backend.BaseWidth * StreamScale,
                             backend.BaseHeight * StreamScale,
                             StreamFps,
-                            (int)backend.SampleRate);
+                            audioCodec == StreamProtocol.AudioCodecOpus ? OpusSampleRate : (int)backend.SampleRate,
+                            audioCodec);
                         await SendBinaryAsync(info, token);
                     }
                 }
@@ -268,6 +298,43 @@ public sealed class StreamHost : IDisposable
         var chunkInterval = TimeSpan.FromSeconds(AudioChunkFrames / backend.SampleRate);
         var scratch = new short[AudioChunkFrames * 2];
 
+        if (opusEncoder == null)
+        {
+            // Legacy raw-PCM fallback for when Opus is unavailable.
+            while (!token.IsCancellationRequested)
+            {
+                await Task.Delay(chunkInterval, token);
+
+                if (!backend.IsGameLoaded)
+                    continue;
+
+                var frames = backend.ReadStreamAudio(scratch, AudioChunkFrames);
+                if (frames <= 0)
+                    continue;
+
+                var byteCount = frames * 4; // stereo int16
+                var pcm = new byte[byteCount];
+                Buffer.BlockCopy(scratch, 0, pcm, 0, byteCount);
+
+                try
+                {
+                    if (ws is { State: WebSocketState.Open })
+                        await SendBinaryAsync(StreamProtocol.PackAudio(pcm), token);
+                }
+                catch (OperationCanceledException) { break; }
+                catch { }
+            }
+            return;
+        }
+
+        var srcRate = (int)backend.SampleRate;
+        var resampler = new StereoResampler(srcRate, OpusSampleRate);
+        // Worst-case resample ratio assumes an 8 kHz core output.
+        var maxOutFrames = AudioChunkFrames * (OpusSampleRate / 8000) + 8;
+        var resampled = new short[maxOutFrames * 2];
+        var pending = new short[(maxOutFrames + OpusFrameSamples) * 2];
+        var pendingFrames = 0;
+
         while (!token.IsCancellationRequested)
         {
             await Task.Delay(chunkInterval, token);
@@ -275,21 +342,52 @@ public sealed class StreamHost : IDisposable
             if (!backend.IsGameLoaded)
                 continue;
 
+            // Cores can change the output rate on load; keep the ratio honest.
+            if ((int)backend.SampleRate != srcRate)
+            {
+                srcRate = (int)backend.SampleRate;
+                resampler = new StereoResampler(srcRate, OpusSampleRate);
+                pendingFrames = 0;
+            }
+
             var frames = backend.ReadStreamAudio(scratch, AudioChunkFrames);
             if (frames <= 0)
                 continue;
 
-            var byteCount = frames * 4; // stereo int16
-            var pcm = new byte[byteCount];
-            Buffer.BlockCopy(scratch, 0, pcm, 0, byteCount);
+            var outFrames = resampler.Resample(
+                scratch.AsSpan(0, frames * 2), frames, resampled, maxOutFrames);
+            if (outFrames <= 0)
+                continue;
+
+            Array.Copy(resampled, 0, pending, pendingFrames * 2, outFrames * 2);
+            pendingFrames += outFrames;
 
             try
             {
-                if (ws is { State: WebSocketState.Open })
-                    await SendBinaryAsync(StreamProtocol.PackAudio(pcm), token);
+                var tlv = new List<byte>((pendingFrames / OpusFrameSamples) * 96);
+                var consumed = 0;
+
+                while (pendingFrames - consumed >= OpusFrameSamples)
+                {
+                    var packet = opusEncoder.Encode(pending.AsSpan(consumed * 2), OpusFrameSamples);
+                    tlv.Add((byte)(packet.Length & 0xFF));
+                    tlv.Add((byte)(packet.Length >> 8));
+                    tlv.AddRange(packet);
+                    consumed += OpusFrameSamples;
+                }
+
+                if (consumed > 0)
+                {
+                    var remaining = pendingFrames - consumed;
+                    Array.Copy(pending, consumed * 2, pending, 0, remaining * 2);
+                    pendingFrames = remaining;
+                }
+
+                if (tlv.Count > 0 && ws is { State: WebSocketState.Open })
+                    await SendBinaryAsync(StreamProtocol.PackAudioOpus(CollectionsMarshal.AsSpan(tlv)), token);
             }
             catch (OperationCanceledException) { break; }
-            catch { }
+            catch (Exception ex) { log($"Stream audio error: {ex.Message}"); }
         }
     }
 
@@ -418,6 +516,9 @@ public sealed class StreamHost : IDisposable
         encoder?.Dispose();
         encoder = null;
 
+        opusEncoder?.Dispose();
+        opusEncoder = null;
+
         if (ws is not null)
         {
             try
@@ -438,5 +539,41 @@ public sealed class StreamHost : IDisposable
     public void Dispose()
     {
         Cleanup();
+    }
+}
+
+// Stateful linear resampler for interleaved stereo int16 PCM.  Good enough
+// for upsampling emulator audio (typically 32 kHz) to Opus's 48 kHz.
+internal sealed class StereoResampler
+{
+    private readonly double step; // input frames per output frame
+    private double pos;           // fractional position, relative to the current chunk
+
+    public StereoResampler(int srcRate, int dstRate)
+    {
+        step = (double)srcRate / dstRate;
+    }
+
+    // Resamples src (srcFrames interleaved stereo frames) into dst.
+    // Returns the number of output frames written.
+    public int Resample(ReadOnlySpan<short> src, int srcFrames, Span<short> dst, int maxDstFrames)
+    {
+        var o = 0;
+
+        // pos + 1 < srcFrames keeps one lookahead sample for interpolation.
+        while (pos + 1 < srcFrames && o < maxDstFrames)
+        {
+            var i = (int)pos;
+            var frac = pos - i;
+            var a = i * 2;
+            var b = a + 2;
+            dst[o * 2] = (short)(src[a] + (src[b] - src[a]) * frac);
+            dst[o * 2 + 1] = (short)(src[a + 1] + (src[b + 1] - src[a + 1]) * frac);
+            o++;
+            pos += step;
+        }
+
+        pos -= srcFrames;
+        return o;
     }
 }

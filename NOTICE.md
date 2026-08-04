@@ -39,8 +39,22 @@ the streaming feature.
   - Source code: https://github.com/cisco/openh264
   - Binary obtained from http://ciscobinary.openh264.org/openh264-2.6.0-win64.dll.bz2.
 
+This plugin also ships **libopus** for Opus audio encoding/decoding used in
+the streaming feature.
+
+- **Opus** — low-latency lossy audio codec.
+  - Copyright 2001-2024 Xiph.Org Foundation, Skype Limited, Octasic,
+    Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell,
+    Mark Borgerding, Erik de Castro Lopo, and other Opus contributors.
+  - License: BSD-3-Clause (see the COPYING file in the source repository).
+  - Source code: https://gitlab.xiph.org/xiph/opus
+  - The shipped `opus.dll` was built locally from the official v1.5.2
+    release source (MSVC x64, CMake shared-library build).
+
 The `snes_h264.dll` wrapper is a thin C++ shim around OpenH264, built from
-`native/snes_h264.cpp` in this repository.
+`native/snes_h264.cpp` in this repository.  The `snes_opus.dll` wrapper is a
+thin C shim around libopus, built from `native/snes_opus.cpp` in this
+repository.
 
 The SnesEmulator plugin itself is licensed under the GNU Affero General Public
 License v3.0 (AGPL-3.0-or-later), which is compatible with the GPLv3.

@@ -19,6 +19,8 @@
     <None Include="bsnes_libretro.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="snes_h264.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="openh264-2.6.0-win64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="snes_opus.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="opus.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\NOTICE.md" Link="NOTICE.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup Condition="Exists('cores')">

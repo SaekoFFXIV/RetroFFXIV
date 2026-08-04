@@ -9,8 +9,9 @@ using NAudio.Wave;
 namespace EmulatorStream;
 
 // Spectator-side streaming client: subscribes to a live player by their
-// player ID, receives H.264 + PCM, decodes video to RGBA32, and plays audio.
-// The latest decoded frame is exposed for ImGui texture upload.
+// player ID, receives H.264 + audio (Opus, or PCM from legacy hosts),
+// decodes video to RGBA32, and plays audio.  The latest decoded frame is
+// exposed for ImGui texture upload.
 public sealed class StreamClient : IDisposable
 {
     private readonly string relayUrl;
@@ -18,6 +19,7 @@ public sealed class StreamClient : IDisposable
 
     private ClientWebSocket? ws;
     private H264Decoder? decoder;
+    private OpusDecoder? opusDecoder;
     private CancellationTokenSource? cts;
     private Task? receiveLoop;
 
@@ -292,9 +294,22 @@ public sealed class StreamClient : IDisposable
                 if (info != null)
                 {
                     sampleRate = info.SampleRate > 0 ? info.SampleRate : 32000;
+
+                    if (info.AudioCodec == StreamProtocol.AudioCodecOpus && opusDecoder == null)
+                    {
+                        try
+                        {
+                            opusDecoder = new OpusDecoder(sampleRate, 2);
+                        }
+                        catch (Exception ex)
+                        {
+                            log($"Opus decoder init failed: {ex.Message}");
+                        }
+                    }
+
                     if (audioEnabled)
                         InitAudio(sampleRate);
-                    log($"Stream info: {info.Width}x{info.Height} @ {info.Fps}fps, audio {sampleRate}Hz");
+                    log($"Stream info: {info.Width}x{info.Height} @ {info.Fps}fps, audio {sampleRate}Hz {info.AudioCodec ?? StreamProtocol.AudioCodecPcm}");
                 }
                 break;
             }
@@ -321,6 +336,29 @@ public sealed class StreamClient : IDisposable
             case StreamProtocol.MsgAudio:
             {
                 audioBuffer?.AddSamples(payload.ToArray(), 0, payload.Length);
+                break;
+            }
+
+            case StreamProtocol.MsgAudioOpus:
+            {
+                if (opusDecoder == null)
+                    break;
+
+                // TLV: [2-byte LE packet length][Opus packet] ...
+                var offset = 0;
+                while (offset + 2 <= payload.Length)
+                {
+                    var packetLen = payload[offset] | (payload[offset + 1] << 8);
+                    offset += 2;
+                    if (packetLen <= 0 || offset + packetLen > payload.Length)
+                        break;
+
+                    var pcm = opusDecoder.Decode(payload.Slice(offset, packetLen));
+                    offset += packetLen;
+
+                    if (pcm != null)
+                        audioBuffer?.AddSamples(pcm, 0, pcm.Length);
+                }
                 break;
             }
         }
@@ -391,6 +429,9 @@ public sealed class StreamClient : IDisposable
 
         decoder?.Dispose();
         decoder = null;
+
+        opusDecoder?.Dispose();
+        opusDecoder = null;
 
         audioOutput?.Dispose();
         audioOutput = null;
