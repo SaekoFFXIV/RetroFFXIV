@@ -4,6 +4,11 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8765:8765"
+    # The relay is a single-threaded asyncio app: one event loop, one core.
+    # Extra CPUs never help it.  What does help is shielding that one core
+    # from the other servers on this box — uncomment to pin it to two
+    # physical cores (adjust the indices to idle cores on the host):
+    # cpuset: "0-1"
     environment:
       - RELAY_HOST=0.0.0.0
       - RELAY_PORT=8765
