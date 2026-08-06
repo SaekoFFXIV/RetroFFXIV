@@ -191,6 +191,8 @@ public sealed class InputManager
         SnesButton.X => Bit(Libretro.JoypadX),
         SnesButton.L => Bit(Libretro.JoypadL),
         SnesButton.R => Bit(Libretro.JoypadR),
+        SnesButton.L2 => Bit(Libretro.JoypadL2),
+        SnesButton.R2 => Bit(Libretro.JoypadR2),
         _ => 0,
     };
 }

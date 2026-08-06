@@ -23,6 +23,13 @@ public interface IEmulatorBackend
     double SampleRate { get; }
 
     /// <summary>
+    /// Display aspect ratio (width / height) declared by the core for the
+    /// loaded game, e.g. ~1.333 for PS1. Zero when the core declared none
+    /// and the frontend should apply its own default.
+    /// </summary>
+    double AspectRatio { get; }
+
+    /// <summary>
     /// Try to get the latest RGBA32 framebuffer.
     /// Returns false if no new frame is available since the last call.
     /// </summary>

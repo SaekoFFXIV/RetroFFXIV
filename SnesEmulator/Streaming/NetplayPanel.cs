@@ -48,6 +48,14 @@ internal sealed class NetplayPanel : IDisposable
             return;
         }
 
+        // The lockstep protocol is SNES-only (16-bit digital joypad, bsnes
+        // determinism); keep it firmly off for PS1 and any future platforms.
+        if (!core.SupportsNetplay)
+        {
+            ImGui.TextWrapped("Netplay currently supports SNES (bsnes) games only.");
+            return;
+        }
+
         if (session is { IsConnected: true })
         {
             DrawActiveSession();

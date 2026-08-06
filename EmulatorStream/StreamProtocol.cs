@@ -214,9 +214,17 @@ public sealed class WorldScreenState
     [JsonPropertyName("width")]
     public float Width { get; set; }
 
+    // Display aspect (width / height) of the host's current game video.
+    // Absent/zero means the legacy 3:2 default; old relays strip unknown
+    // fields, so viewers degrade to that default gracefully.
+    [JsonPropertyName("aspect")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public float Aspect { get; set; }
+
     public WorldScreenState Clone() => new()
     {
         Position = Position is null ? null : (float[])Position.Clone(),
         Width = Width,
+        Aspect = Aspect,
     };
 }

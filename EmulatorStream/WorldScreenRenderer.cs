@@ -19,6 +19,10 @@ public sealed class WorldScreenRenderer
     private const float SurfaceSamplePixels = 5f;
     private const float MaxSurfaceSampleDistance = 2f;
 
+    // The product's classic TV look. Cores that declare their own display
+    // aspect (PS1's 4:3) override it per screen via Aspect.
+    public const float DefaultAspect = 3f / 2f;
+
     private readonly IGameGui gameGui;
     private readonly ITextureProvider textureProvider;
     private readonly StreamConfig config;
@@ -37,6 +41,11 @@ public sealed class WorldScreenRenderer
     // Local screens follow the current local configuration. Watched screens
     // receive an explicit width from their live host instead.
     public float ScreenWidth => remoteScreenWidth ?? config.ScreenWidth;
+
+    // Display aspect (width / height) of the video on this screen.
+    public float Aspect { get; set; } = DefaultAspect;
+
+    private float HalfHeight => ScreenWidth / (2f * Aspect);
 
     private IDalamudTextureWrap? screenTexture;
     private byte[]? pendingFrame;
@@ -128,7 +137,7 @@ public sealed class WorldScreenRenderer
         // 3 yalms in front of the player when the ray hits nothing.
         var yaw = getPlayerRot();
         var forward = new Vector3((float)Math.Sin(yaw), 0, (float)Math.Cos(yaw));
-        var halfHeight = ScreenWidth / 3f;
+        var halfHeight = HalfHeight;
         var previewPos = playerPos.Value + forward * 3f
             + new Vector3(0, config.ScreenHeight + halfHeight, 0);
 
@@ -235,7 +244,7 @@ public sealed class WorldScreenRenderer
         Vector3 center, Vector3 camPos, Vector3? surfaceNormal)
     {
         var halfW = ScreenWidth / 2f;
-        var halfH = halfW * (2f / 3f); // 3:2 screen
+        var halfH = halfW / Aspect;
 
         GetQuadBasis(center, camPos, surfaceNormal, out var right, out var up);
 
@@ -253,6 +262,12 @@ public sealed class WorldScreenRenderer
     {
         if (state?.Width > 0f)
             remoteScreenWidth = MathF.Max(0.5f, MathF.Min(20f, state.Width));
+
+        // Host-authoritative display aspect; hosts/relays from before the
+        // aspect field fall back to the classic 3:2.
+        Aspect = state is { Aspect: > 0f }
+            ? MathF.Max(0.4f, MathF.Min(4f, state.Aspect))
+            : DefaultAspect;
 
         if (state?.Position is not { Length: >= 3 })
         {
@@ -371,7 +386,7 @@ public sealed class WorldScreenRenderer
 
         GetQuadBasis(hit, camPos, normal, out var quadRight, out var quadUp);
         var halfWidth = ScreenWidth / 2f;
-        var halfHeight = ScreenWidth / 3f;
+        var halfHeight = HalfHeight;
 
         // The click is the bottom-center support point, not the center of the
         // picture. This prevents half of a large screen entering the ground.

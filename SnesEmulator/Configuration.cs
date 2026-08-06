@@ -15,6 +15,10 @@ public enum SnesButton
     Y,
     L,
     R,
+    // Extra RetroPad shoulders (ids 12/13) — used by PS1 games; the SNES
+    // never asks for them.
+    L2,
+    R2,
     Start,
     Select,
 }
@@ -117,6 +121,8 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         [nameof(SnesButton.Y)] = 0x41,      // A
         [nameof(SnesButton.L)] = 0x51,      // Q
         [nameof(SnesButton.R)] = 0x45,      // E
+        [nameof(SnesButton.L2)] = 0x31,     // 1
+        [nameof(SnesButton.R2)] = 0x32,     // 2
         [nameof(SnesButton.Start)] = 0x0D,  // Enter
         [nameof(SnesButton.Select)] = 0x10, // Shift
     };
@@ -131,6 +137,8 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         [nameof(SnesButton.Y)] = 0x4000,      // XInput X (left)
         [nameof(SnesButton.L)] = 0x0100,      // LB
         [nameof(SnesButton.R)] = 0x0200,      // RB
+        [nameof(SnesButton.L2)] = 0x0400,     // LT (analog trigger, thresholded)
+        [nameof(SnesButton.R2)] = 0x0800,     // RT (analog trigger, thresholded)
         [nameof(SnesButton.Start)] = 0x0010,  // Start
         [nameof(SnesButton.Select)] = 0x0020, // Back
     };

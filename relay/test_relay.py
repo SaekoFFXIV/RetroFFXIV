@@ -93,10 +93,12 @@ async def test_registration_and_live():
     ok("go_live with foreign ID rejected", resp.get("type") == "error", str(resp))
     await other.close()
 
-    # Host goes live under their own ID.
+    # Host goes live under their own ID. The display aspect rides along so
+    # PS1 hosts (4:3) place correctly-proportioned screens for viewers.
     initial_screen = {
         "position": [12.5, 3.0, -8.25, 0.0, 0.0, 1.0],
         "width": 6.0,
+        "aspect": 4.0 / 3.0,
     }
     await host.send(json.dumps({
         "action": "go_live", "uid": uid,
@@ -129,11 +131,22 @@ async def test_registration_and_live():
     updated_screen = {
         "position": [20.0, 4.5, -3.0, 1.0, 0.0, 0.0],
         "width": 12.5,
+        "aspect": 4.0 / 3.0,
     }
     await host.send(json.dumps({"action": "screen_state", "screen": updated_screen}))
     r = json.loads(await spec.recv())
     ok("spectator receives screen update", r.get("type") == "screen_state"
        and r.get("screen") == updated_screen, str(r))
+
+    # Out-of-range or non-numeric aspect is rejected with an error to the
+    # host; the retained state stays the last valid one.
+    for bad in (9.0, -1.0, "tall"):
+        await host.send(json.dumps({
+            "action": "screen_state",
+            "screen": {**updated_screen, "aspect": bad},
+        }))
+        r = json.loads(await host.recv())
+        ok(f"screen_state rejects aspect {bad!r}", r.get("type") == "error", str(r))
 
     late_spec = await websockets.connect(RELAY)
     await late_spec.send(json.dumps({"action": "subscribe", "player_id": player_id}))

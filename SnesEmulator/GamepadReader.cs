@@ -22,6 +22,9 @@ public sealed class GamepadReader : IDisposable
     public const ushort RightThumb = 0x0080;
     public const ushort LeftShoulder = 0x0100;
     public const ushort RightShoulder = 0x0200;
+    // Synthetic flags: analog triggers thresholded to digital (PS1's L2/R2).
+    public const ushort LeftTrigger = 0x0400;
+    public const ushort RightTrigger = 0x0800;
     public const ushort A = 0x1000;
     public const ushort B = 0x2000;
     public const ushort X = 0x4000;
@@ -73,7 +76,10 @@ public sealed class GamepadReader : IDisposable
                 if (pad != null)
                 {
                     var r = pad.GetCurrentReading();
-                    wgiBtns = MapWgi(r.Buttons);
+                    var btns = MapWgi(r.Buttons);
+                    if (r.LeftTrigger > TriggerThreshold) btns |= LeftTrigger;
+                    if (r.RightTrigger > TriggerThreshold) btns |= RightTrigger;
+                    wgiBtns = btns;
                     wgiSX = (float)r.LeftThumbstickX;
                     wgiSY = (float)r.LeftThumbstickY;
                     wgiOk = true;
@@ -341,6 +347,8 @@ public sealed class GamepadReader : IDisposable
 
     // ── Unified state ───────────────────────────────────────────────
 
+    private const double TriggerThreshold = 0.5;
+
     private ushort buttons;
     private float leftStickX, leftStickY;
     public bool Connected { get; private set; }
@@ -364,7 +372,10 @@ public sealed class GamepadReader : IDisposable
             if (XInputGetState(i, out var xs) == 0)
             {
                 Connected = true;
-                buttons = xs.G.Buttons;
+                var btns = xs.G.Buttons;
+                if (xs.G.LT > TriggerThreshold * 255) btns |= LeftTrigger;
+                if (xs.G.RT > TriggerThreshold * 255) btns |= RightTrigger;
+                buttons = btns;
                 leftStickX = xs.G.LX / 32768f;
                 leftStickY = xs.G.LY / 32768f;
                 DebugInfo = $"XInput slot {i}";

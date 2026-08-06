@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 
 namespace SnesEmulator.Emulation;
 
-public sealed record CoreInfo(string Path, string Name, string Version, string[] Extensions)
+public sealed record CoreInfo(string Path, string Name, string Version, string[] Extensions, bool NeedFullpath)
 {
     // Keep libretro's real identity for loading/configuration, but present
     // straightforward platform names in the player-facing selector.
@@ -15,6 +15,8 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
         var file when file.Contains("bsnes", StringComparison.OrdinalIgnoreCase) => "SNES",
         var file when file.Contains("blastem", StringComparison.OrdinalIgnoreCase) => "Sega",
         var file when file.Contains("mgba", StringComparison.OrdinalIgnoreCase) => "GBA",
+        var file when file.Contains("mednafen_psx", StringComparison.OrdinalIgnoreCase) => "PS1",
+        var file when file.Contains("beetle_psx", StringComparison.OrdinalIgnoreCase) => "PS1",
         _ => string.IsNullOrEmpty(Version) ? Name : $"{Name} {Version}",
     };
 }
@@ -125,7 +127,9 @@ public sealed class CoreManager
                 .Select(e => e.StartsWith('.') ? e.ToLowerInvariant() : $".{e.ToLowerInvariant()}")
                 .ToArray();
 
-            return new CoreInfo(dllPath, name, version, extensions);
+            // need_fullpath cores (disc images) must be loaded by path, never
+            // copied into managed memory by the frontend.
+            return new CoreInfo(dllPath, name, version, extensions, info.NeedFullpath);
         }
         finally
         {

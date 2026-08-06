@@ -61,13 +61,15 @@ public sealed class EmulatorService : IDisposable
     {
         SnesButton.Up, SnesButton.Down, SnesButton.Left, SnesButton.Right,
         SnesButton.A, SnesButton.B, SnesButton.X, SnesButton.Y,
-        SnesButton.L, SnesButton.R, SnesButton.Start, SnesButton.Select,
+        SnesButton.L, SnesButton.R, SnesButton.L2, SnesButton.R2,
+        SnesButton.Start, SnesButton.Select,
     };
 
     private static readonly SnesButton[] ControllerButtonOrder =
     {
         SnesButton.A, SnesButton.B, SnesButton.X, SnesButton.Y,
-        SnesButton.L, SnesButton.R, SnesButton.Start, SnesButton.Select,
+        SnesButton.L, SnesButton.R, SnesButton.L2, SnesButton.R2,
+        SnesButton.Start, SnesButton.Select,
     };
 
     private static readonly string[] DeckTabLabels = { "ROM", "Controls", "Settings", "Sync", "Friends" };
@@ -76,6 +78,7 @@ public sealed class EmulatorService : IDisposable
     {
         GamepadReader.A, GamepadReader.B, GamepadReader.X, GamepadReader.Y,
         GamepadReader.LeftShoulder, GamepadReader.RightShoulder,
+        GamepadReader.LeftTrigger, GamepadReader.RightTrigger,
         GamepadReader.Start, GamepadReader.Back,
         GamepadReader.DPadUp, GamepadReader.DPadDown, GamepadReader.DPadLeft, GamepadReader.DPadRight,
         GamepadReader.LeftThumb, GamepadReader.RightThumb,
@@ -241,8 +244,18 @@ public sealed class EmulatorService : IDisposable
         var saved = normal is { } n
             ? new[] { position.X, position.Y, position.Z, n.X, n.Y, n.Z }
             : new[] { position.X, position.Y, position.Z };
-        return new WorldScreenState { Position = saved, Width = config.ScreenWidth };
+        return new WorldScreenState
+        {
+            Position = saved,
+            Width = config.ScreenWidth,
+            Aspect = CoreAspect(),
+        };
     }
+
+    // Display aspect of the running game for world screens and stream
+    // metadata; zero keeps the classic 3:2 until a core declares otherwise.
+    private float CoreAspect() =>
+        core is { IsGameLoaded: true } && core.AspectRatio > 0 ? (float)core.AspectRatio : 0f;
 
     private void PublishLocalScreenState() => streamPanel?.PublishScreenState(CreateLocalScreenState());
 
@@ -271,7 +284,7 @@ public sealed class EmulatorService : IDisposable
     {
         if (ReferenceEquals(left, right))
             return true;
-        if (left is null || right is null || left.Width != right.Width)
+        if (left is null || right is null || left.Width != right.Width || left.Aspect != right.Aspect)
             return false;
         if (left.Position is null || right.Position is null)
             return left.Position is null && right.Position is null;
@@ -1449,6 +1462,15 @@ public sealed class EmulatorService : IDisposable
                 crtAnimTarget = 1f;
                 StopAudio();
 
+                // The local world screen shows whatever the current game
+                // declares (PS1's 4:3 instead of the SNES-era 3:2).
+                if (worldScreen != null)
+                {
+                    worldScreen.Aspect = core.AspectRatio > 0
+                        ? (float)core.AspectRatio
+                        : WorldScreenRenderer.DefaultAspect;
+                }
+
                 gameKey = Path.GetFileNameWithoutExtension(resolvedPath);
                 core.PreFrame = () =>
                 {
@@ -1493,6 +1515,14 @@ public sealed class EmulatorService : IDisposable
     {
         if (string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase))
         {
+            // Disc images reference sibling files and are loaded by path;
+            // unpacking them into temp would break the cue/bin relationship.
+            if (selectedCore is { NeedFullpath: true })
+            {
+                throw new InvalidOperationException(
+                    "Disc images cannot be loaded from a ZIP. Use the cue/bin, chd, or pbp files directly.");
+            }
+
             return ExtractRomFromZip(path);
         }
 
@@ -2813,9 +2843,10 @@ public sealed class EmulatorService : IDisposable
             Right = right,
             Up = up,
             HalfWidth = renderer.ScreenWidth / 2f,
-            // All screens use the same 3:2 video aspect, but watched streams
-            // supply their own host-authoritative width.
-            HalfHeight = renderer.ScreenWidth / 3f,
+            // Screens keep their own aspect (3:2 classic, or the core's
+            // declared one); watched streams additionally supply a
+            // host-authoritative width.
+            HalfHeight = renderer.ScreenWidth / (2f * renderer.Aspect),
         };
     }
 

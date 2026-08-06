@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -55,6 +56,19 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private GCHandle romHandle;
     private bool romPinned;
 
+    // Set when retro_system_info.need_fullpath is true (disc-based cores like
+    // Beetle PSX): content is loaded by path only, never read into memory.
+    private bool needFullpath;
+
+    // Core option store (retro_variable). Cores declare options via
+    // SET_VARIABLES ("key", "Description; opt1|opt2|...") and read them back
+    // via GET_VARIABLE during init/load. There is no options UI yet, so every
+    // value stays at its default (the first listed option); answering the
+    // queries is still mandatory for cores like Beetle PSX to load at all.
+    // The values are pinned unmanaged strings because the core receives raw
+    // pointers into them.
+    private readonly Dictionary<string, IntPtr> variableValues = new();
+
     private Thread? thread;
     private volatile bool running;
 
@@ -76,6 +90,15 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     public double Fps { get; private set; } = 60.0;
     public double SampleRate { get; private set; } = 32000.0;
     private uint pixelFormat = Libretro.PixelFormat0RGB1555;
+
+    // Display aspect (width / height) declared by the core, 0 when the core
+    // did not declare one and the frontend should apply its own default.
+    public double AspectRatio { get; private set; }
+
+    // Lockstep netplay is only validated for the deterministic bsnes core,
+    // and the 16-bit SNES-only input protocol is wrong for other platforms.
+    public bool SupportsNetplay =>
+        LibraryName.Contains("bsnes", StringComparison.OrdinalIgnoreCase);
 
     // Invoked on the emulation thread immediately before each frame, to refresh input.
     public Action? PreFrame { get; set; }
@@ -159,6 +182,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         getSystemInfo(out var info);
         LibraryName = Marshal.PtrToStringAnsi(info.LibraryName) ?? string.Empty;
         LibraryVersion = Marshal.PtrToStringAnsi(info.LibraryVersion) ?? string.Empty;
+        needFullpath = info.NeedFullpath;
     }
 
     public bool LoadGame(string romPath)
@@ -170,20 +194,37 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
         UnloadGame();
 
-        var rom = File.ReadAllBytes(romPath);
-        romHandle = GCHandle.Alloc(rom, GCHandleType.Pinned);
-        romPinned = true;
-
         var pathPtr = Marshal.StringToHGlobalAnsi(romPath);
         try
         {
-            var gameInfo = new RetroGameInfo
+            RetroGameInfo gameInfo;
+            if (needFullpath)
             {
-                Path = pathPtr,
-                Data = romHandle.AddrOfPinnedObject(),
-                Size = (UIntPtr)rom.Length,
-                Meta = IntPtr.Zero,
-            };
+                // Disc images (cue/bin, pbp, chd, m3u) are read from disk by
+                // the core itself; they can reference sibling files and are
+                // far too large to copy into managed memory.
+                gameInfo = new RetroGameInfo
+                {
+                    Path = pathPtr,
+                    Data = IntPtr.Zero,
+                    Size = UIntPtr.Zero,
+                    Meta = IntPtr.Zero,
+                };
+            }
+            else
+            {
+                var rom = File.ReadAllBytes(romPath);
+                romHandle = GCHandle.Alloc(rom, GCHandleType.Pinned);
+                romPinned = true;
+
+                gameInfo = new RetroGameInfo
+                {
+                    Path = pathPtr,
+                    Data = romHandle.AddrOfPinnedObject(),
+                    Size = (UIntPtr)rom.Length,
+                    Meta = IntPtr.Zero,
+                };
+            }
 
             if (!loadGame(ref gameInfo))
             {
@@ -200,6 +241,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         BaseHeight = (int)av.Geometry.BaseHeight;
         Fps = av.Timing.Fps > 0 ? av.Timing.Fps : 60.0;
         SampleRate = av.Timing.SampleRate > 0 ? av.Timing.SampleRate : 32000.0;
+        AspectRatio = av.Geometry.AspectRatio > 0f ? av.Geometry.AspectRatio : 0.0;
         ShutdownRequested = false;
         IsGameLoaded = true;
         return true;
@@ -488,6 +530,38 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 return true;
 
             case Libretro.EnvSetVariables:
+                SetVariables(data);
+                return true;
+
+            case Libretro.EnvGetVariable:
+            {
+                var keyPtr = Marshal.ReadIntPtr(data);
+                var key = Marshal.PtrToStringAnsi(keyPtr);
+                if (key != null && variableValues.TryGetValue(key, out var valuePtr))
+                {
+                    Marshal.WriteIntPtr(data, IntPtr.Size, valuePtr);
+                    return true;
+                }
+
+                return false;
+            }
+
+            case Libretro.EnvSetGeometry:
+            {
+                // The core changed its video mode mid-game (PS1 titles switch
+                // resolutions freely). Keep the base dimensions current; an
+                // explicit aspect overrides the load-time one.
+                var geometry = Marshal.PtrToStructure<RetroGameGeometry>(data);
+                BaseWidth = (int)geometry.BaseWidth;
+                BaseHeight = (int)geometry.BaseHeight;
+                if (geometry.AspectRatio > 0f)
+                {
+                    AspectRatio = geometry.AspectRatio;
+                }
+
+                return true;
+            }
+
             case Libretro.EnvSetRotation:
             case Libretro.EnvSetMessage:
             case Libretro.EnvSetSupportNoGame:
@@ -500,6 +574,58 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             default:
                 return false;
         }
+    }
+
+    // Parses the SET_VARIABLES array (retro_variable pairs terminated by a
+    // null key). Each value string has the form "Description; opt1|opt2|...";
+    // the first option is the default. Values are pinned for the lifetime of
+    // the core because GET_VARIABLE hands raw pointers to the native side.
+    private void SetVariables(IntPtr data)
+    {
+        FreeVariables();
+
+        var offset = 0;
+        while (true)
+        {
+            var keyPtr = Marshal.ReadIntPtr(data, offset);
+            if (keyPtr == IntPtr.Zero)
+            {
+                break;
+            }
+
+            var rawPtr = Marshal.ReadIntPtr(data, offset + IntPtr.Size);
+            offset += IntPtr.Size * 2;
+
+            var key = Marshal.PtrToStringAnsi(keyPtr);
+            var raw = Marshal.PtrToStringAnsi(rawPtr) ?? string.Empty;
+            if (string.IsNullOrEmpty(key) || variableValues.ContainsKey(key))
+            {
+                continue;
+            }
+
+            var defaultValue = string.Empty;
+            var separator = raw.IndexOf(';');
+            if (separator >= 0)
+            {
+                var options = raw[(separator + 1)..].Split('|', StringSplitOptions.TrimEntries);
+                if (options.Length > 0)
+                {
+                    defaultValue = options[0];
+                }
+            }
+
+            variableValues[key] = Marshal.StringToHGlobalAnsi(defaultValue);
+        }
+    }
+
+    private void FreeVariables()
+    {
+        foreach (var ptr in variableValues.Values)
+        {
+            Marshal.FreeHGlobal(ptr);
+        }
+
+        variableValues.Clear();
     }
 
     private unsafe void VideoRefresh(IntPtr data, uint width, uint height, UIntPtr pitch)
@@ -661,6 +787,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     public void Dispose()
     {
         UnloadGame();
+        FreeVariables();
 
         if (library != IntPtr.Zero)
         {

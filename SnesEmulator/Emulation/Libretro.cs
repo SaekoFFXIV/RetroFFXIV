@@ -22,6 +22,7 @@ public static class Libretro
     public const uint EnvShutdown = 7;
     public const uint EnvGetSystemDirectory = 9;
     public const uint EnvSetPixelFormat = 10;
+    public const uint EnvSetGeometry = 14;
     public const uint EnvGetVariable = 15;
     public const uint EnvSetVariables = 16;
     public const uint EnvGetVariableUpdate = 17;

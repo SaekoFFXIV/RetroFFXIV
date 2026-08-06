@@ -509,6 +509,7 @@ def _validate_screen_state(screen: object) -> dict | None:
 
     position = screen.get("position")
     width = screen.get("width")
+    aspect = screen.get("aspect")
     if not isinstance(position, list) or len(position) not in (3, 6):
         raise ValueError("screen position must contain 3 or 6 values")
     if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in position):
@@ -517,11 +518,19 @@ def _validate_screen_state(screen: object) -> dict | None:
         raise ValueError("screen width is invalid")
     if not 0.5 <= float(width) <= 20.0:
         raise ValueError("screen width is out of range")
+    if aspect is not None:
+        if not isinstance(aspect, (int, float)) or not math.isfinite(float(aspect)):
+            raise ValueError("screen aspect is invalid")
+        if not 0.4 <= float(aspect) <= 4.0:
+            raise ValueError("screen aspect is out of range")
 
-    return {
+    state = {
         "position": [float(value) for value in position],
         "width": float(width),
     }
+    if aspect is not None:
+        state["aspect"] = float(aspect)
+    return state
 
 
 async def _handle_go_live(ws: WebSocket, uid: str, player_id: str,
