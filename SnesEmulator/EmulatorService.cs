@@ -1410,6 +1410,9 @@ public sealed class EmulatorService : IDisposable
             var saveDir = Path.Combine(dataDir.FullName, "saves");
             Directory.CreateDirectory(systemDir);
             Directory.CreateDirectory(saveDir);
+            // LRPS2 looks for PS2 BIOS dumps here; the plugin creates the
+            // layout but never ships BIOS (user-provided legal dumps only).
+            Directory.CreateDirectory(Path.Combine(systemDir, "pcsx2", "bios"));
 
             var newCore = new RetroCore
             {
@@ -1418,6 +1421,16 @@ public sealed class EmulatorService : IDisposable
                 InputState = inputManager.GetInputState,
                 BackgroundError = ex => log.Error(ex,
                     "Emulator thread stopped after a contained core failure"),
+                LogReceived = (level, text) =>
+                {
+                    switch (level)
+                    {
+                        case Libretro.LogLevelError: log.Error("[core] {Text}", text); break;
+                        case Libretro.LogLevelWarn: log.Warning("[core] {Text}", text); break;
+                        case Libretro.LogLevelInfo: log.Information("[core] {Text}", text); break;
+                        default: log.Debug("[core] {Text}", text); break;
+                    }
+                },
             };
             newCore.Load(path);
             core = newCore;

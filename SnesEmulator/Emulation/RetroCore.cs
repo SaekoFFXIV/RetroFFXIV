@@ -41,6 +41,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private RetroAudioSampleBatchDelegate audioBatchCb = null!;
     private RetroInputPollDelegate inputPollCb = null!;
     private RetroInputStateDelegate inputStateCb = null!;
+    private RetroLogPrintfDelegate logPrintfCb = null!;
 
     // Save-state support (retro_serialize / retro_unserialize).
     private RetroSerializeSizeDelegate serializeSize = null!;
@@ -68,6 +69,16 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     // The values are pinned unmanaged strings because the core receives raw
     // pointers into them.
     private readonly Dictionary<string, IntPtr> variableValues = new();
+    private readonly Dictionary<string, string> variableRaws = new();
+
+    // Per-option overrides for cores whose first-listed default does not fit
+    // this frontend. LRPS2 defaults its renderer to Auto, which wants a
+    // hardware context we cannot provide; the CPU software renderer feeds the
+    // ordinary video-refresh path instead.
+    private static readonly Dictionary<string, string> variableOverrides = new()
+    {
+        ["pcsx2_renderer"] = "Software (SW)",
+    };
 
     private Thread? thread;
     private volatile bool running;
@@ -83,6 +94,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     // Negotiated / core state.
     public string LibraryName { get; private set; } = string.Empty;
     public string LibraryVersion { get; private set; } = string.Empty;
+    public string[] Extensions { get; private set; } = [];
     public bool IsGameLoaded { get; private set; }
     public bool ShutdownRequested { get; private set; }
     public int BaseWidth { get; private set; }
@@ -100,12 +112,40 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     public bool SupportsNetplay =>
         LibraryName.Contains("bsnes", StringComparison.OrdinalIgnoreCase);
 
+    // Raw SET_VARIABLES declarations ("Description; opt1|opt2|...") keyed by
+    // option key, for diagnostics (tools/core-smoke -info).
+    public IReadOnlyDictionary<string, string> VariableDeclarations => variableRaws;
+
+    // The value currently answered for a core option (for diagnostics).
+    public string? GetVariableSelection(string key) =>
+        variableValues.TryGetValue(key, out var ptr) ? Marshal.PtrToStringAnsi(ptr) : null;
+
     // Invoked on the emulation thread immediately before each frame, to refresh input.
     public Action? PreFrame { get; set; }
 
     // Background-thread failures must be reported, never allowed to reach
     // AppDomain.UnhandledException (Dalamud treats that as a process crash).
     public Action<Exception>? BackgroundError { get; set; }
+
+    // Core log lines (retro_log_level, text), emitted from the emulation
+    // thread.
+    public Action<int, string>? LogReceived { get; set; }
+
+    // CRT vsnprintf, used to format the core's va_list log lines natively.
+    private static readonly VsnprintfDelegate? vsnprintfCall = ResolveVsnprintf();
+
+    private delegate int VsnprintfDelegate(IntPtr buffer, UIntPtr count, IntPtr format, IntPtr vaList);
+
+    private static VsnprintfDelegate? ResolveVsnprintf()
+    {
+        if (NativeLibrary.TryLoad("ucrtbase.dll", out var ucrt) &&
+            NativeLibrary.TryGetExport(ucrt, "vsnprintf", out var export))
+        {
+            return Marshal.GetDelegateForFunctionPointer<VsnprintfDelegate>(export);
+        }
+
+        return null;
+    }
 
     // Latest frame, RGBA32.
     private readonly object frameLock = new();
@@ -166,6 +206,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         audioBatchCb = AudioSampleBatch;
         inputPollCb = InputPoll;
         inputStateCb = InputStateCallback;
+        logPrintfCb = LogPrintf;
 
         systemDirPtr = Marshal.StringToHGlobalAnsi(SystemDirectory);
         saveDirPtr = Marshal.StringToHGlobalAnsi(SaveDirectory);
@@ -183,6 +224,8 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         LibraryName = Marshal.PtrToStringAnsi(info.LibraryName) ?? string.Empty;
         LibraryVersion = Marshal.PtrToStringAnsi(info.LibraryVersion) ?? string.Empty;
         needFullpath = info.NeedFullpath;
+        Extensions = (Marshal.PtrToStringAnsi(info.ValidExtensions) ?? string.Empty)
+            .Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     public bool LoadGame(string romPath)
@@ -236,6 +279,33 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             Marshal.FreeHGlobal(pathPtr);
         }
 
+        CaptureAvInfo();
+        return true;
+    }
+
+    // Boot without content (cores that advertised no-game support, e.g. the
+    // PS2 BIOS browser).
+    public bool LoadNoGame()
+    {
+        if (library == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("No core loaded.");
+        }
+
+        UnloadGame();
+
+        RetroGameInfo gameInfo = default;
+        if (!loadGame(ref gameInfo))
+        {
+            return false;
+        }
+
+        CaptureAvInfo();
+        return true;
+    }
+
+    private void CaptureAvInfo()
+    {
         getSystemAvInfo(out var av);
         BaseWidth = (int)av.Geometry.BaseWidth;
         BaseHeight = (int)av.Geometry.BaseHeight;
@@ -244,7 +314,6 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         AspectRatio = av.Geometry.AspectRatio > 0f ? av.Geometry.AspectRatio : 0.0;
         ShutdownRequested = false;
         IsGameLoaded = true;
-        return true;
     }
 
     // Begin running the emulation on its own thread.
@@ -562,6 +631,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 return true;
             }
 
+            case Libretro.EnvGetLogInterface:
+                Marshal.StructureToPtr(new RetroLogCallback { Log = logPrintfCb }, data, false);
+                return true;
+
             case Libretro.EnvSetRotation:
             case Libretro.EnvSetMessage:
             case Libretro.EnvSetSupportNoGame:
@@ -603,6 +676,8 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 continue;
             }
 
+            variableRaws[key] = raw;
+
             var defaultValue = string.Empty;
             var separator = raw.IndexOf(';');
             if (separator >= 0)
@@ -611,6 +686,12 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 if (options.Length > 0)
                 {
                     defaultValue = options[0];
+                }
+
+                if (variableOverrides.TryGetValue(key, out var overridden) &&
+                    Array.IndexOf(options, overridden) >= 0)
+                {
+                    defaultValue = overridden;
                 }
             }
 
@@ -626,6 +707,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
 
         variableValues.Clear();
+        variableRaws.Clear();
     }
 
     private unsafe void VideoRefresh(IntPtr data, uint width, uint height, UIntPtr pitch)
@@ -782,6 +864,32 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private short InputStateCallback(uint port, uint device, uint index, uint id)
     {
         return InputState?.Invoke(port, device, index, id) ?? 0;
+    }
+
+    // Formats the core's printf-style log line natively (the va_list pointer
+    // cannot be interpreted managed-side) and forwards it.
+    private void LogPrintf(int level, IntPtr format, IntPtr vaList)
+    {
+        var sink = LogReceived;
+        if (sink == null || vsnprintfCall == null)
+        {
+            return;
+        }
+
+        var buffer = Marshal.AllocHGlobal(4096);
+        try
+        {
+            vsnprintfCall(buffer, (UIntPtr)4096, format, vaList);
+            var text = Marshal.PtrToStringAnsi(buffer)?.TrimEnd() ?? string.Empty;
+            if (text.Length > 0)
+            {
+                sink(level, text);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     public void Dispose()

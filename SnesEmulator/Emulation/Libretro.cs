@@ -64,6 +64,12 @@ public static class Libretro
     public const uint MemoryRtc = 1;
     public const uint MemorySystemRam = 2;
     public const uint MemoryVideoRam = 3;
+
+    // Log levels (retro_log_level).
+    public const int LogLevelDebug = 0;
+    public const int LogLevelInfo = 1;
+    public const int LogLevelWarn = 2;
+    public const int LogLevelError = 3;
 }
 
 // C99 bool is 1 byte; every bool below is marshaled as I1 to match, otherwise the core and the
@@ -138,6 +144,18 @@ public delegate void RetroInputPollDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate short RetroInputStateDelegate(uint port, uint device, uint index, uint id);
+
+// retro_log_printf_t. The variadic arguments arrive as a native va_list
+// pointer and are formatted on the C runtime side (vsnprintf), so they stay
+// opaque here.
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void RetroLogPrintfDelegate(int level, IntPtr format, IntPtr vaList);
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RetroLogCallback
+{
+    public RetroLogPrintfDelegate Log;
+}
 
 // Functions the core exports and the frontend calls. Resolved at runtime via NativeLibrary because
 // the core DLL path is user-configurable.

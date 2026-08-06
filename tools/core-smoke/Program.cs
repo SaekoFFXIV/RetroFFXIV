@@ -3,11 +3,14 @@ using System.IO;
 using SnesEmulator.Emulation;
 
 // Usage: CoreSmoke -core <dll> -system <dir> -save <dir> -rom <file> [-frames N]
+//        CoreSmoke -core <dll> -system <dir> -info   (no content: dump identity + options)
 var corePath = string.Empty;
 var systemDir = string.Empty;
 var saveDir = string.Empty;
 var romPath = string.Empty;
 var frames = 300;
+var infoOnly = Array.IndexOf(args, "-info") >= 0;
+var noGame = Array.IndexOf(args, "-nogame") >= 0;
 
 for (var i = 0; i < args.Length - 1; i++)
 {
@@ -21,13 +24,19 @@ for (var i = 0; i < args.Length - 1; i++)
     }
 }
 
-if (corePath.Length == 0 || romPath.Length == 0)
+if (corePath.Length == 0 || (!infoOnly && !noGame && romPath.Length == 0))
 {
     Console.Error.WriteLine("usage: CoreSmoke -core <dll> -system <dir> -save <dir> -rom <file> [-frames N]");
+    Console.Error.WriteLine("       CoreSmoke -core <dll> -system <dir> -info");
+    Console.Error.WriteLine("       CoreSmoke -core <dll> -system <dir> -save <dir> -nogame [-frames N]");
     return 2;
 }
 
-Directory.CreateDirectory(saveDir);
+if (saveDir.Length > 0)
+{
+    Directory.CreateDirectory(saveDir);
+}
+
 Console.WriteLine($"[smoke] core    = {corePath}");
 Console.WriteLine($"[smoke] system  = {systemDir}");
 Console.WriteLine($"[smoke] save    = {saveDir}");
@@ -44,14 +53,30 @@ using var core = new RetroCore
         Console.WriteLine($"[smoke] BACKGROUND ERROR: {ex}");
         failed = true;
     },
+    LogReceived = (level, text) => Console.WriteLine($"[core:{level}] {text}"),
 };
 
 core.Load(corePath);
 Console.WriteLine($"[smoke] loaded: {core.LibraryName} {core.LibraryVersion}");
 
-if (!core.LoadGame(romPath))
+if (infoOnly)
 {
-    Console.WriteLine("[smoke] FAIL: core refused to load the content");
+    Console.WriteLine($"[smoke] extensions: {string.Join(", ", core.Extensions)}");
+    Console.WriteLine($"[smoke] options ({core.VariableDeclarations.Count}):");
+    foreach (var (key, raw) in core.VariableDeclarations)
+    {
+        Console.WriteLine($"[smoke]   {key} -> [{core.GetVariableSelection(key)}] from: {raw}");
+    }
+
+    return 0;
+}
+
+var loaded = noGame ? core.LoadNoGame() : core.LoadGame(romPath);
+if (!loaded)
+{
+    Console.WriteLine(noGame
+        ? "[smoke] FAIL: core refused to boot without content"
+        : "[smoke] FAIL: core refused to load the content");
     return 1;
 }
 

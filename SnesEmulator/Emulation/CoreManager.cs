@@ -17,6 +17,8 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
         var file when file.Contains("mgba", StringComparison.OrdinalIgnoreCase) => "GBA",
         var file when file.Contains("mednafen_psx", StringComparison.OrdinalIgnoreCase) => "PS1",
         var file when file.Contains("beetle_psx", StringComparison.OrdinalIgnoreCase) => "PS1",
+        var file when file.Contains("pcsx2", StringComparison.OrdinalIgnoreCase) => "PS2",
+        var file when file.Contains("lrps2", StringComparison.OrdinalIgnoreCase) => "PS2",
         _ => string.IsNullOrEmpty(Version) ? Name : $"{Name} {Version}",
     };
 }
