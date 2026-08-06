@@ -1455,6 +1455,19 @@ public sealed class EmulatorService : IDisposable
                 return;
             }
 
+            // Refuse content the selected core cannot run — a stale selection
+            // or a noisy extension list (BlastEm's bin/iso) must not hand a
+            // foreign ROM, or a 474 MB disc image, to the wrong core.
+            if (selectedCore is { Extensions.Length: > 0 }
+                && !string.Equals(Path.GetExtension(romPath), ".zip", StringComparison.OrdinalIgnoreCase)
+                && !Array.Exists(selectedCore.Extensions, ext =>
+                       string.Equals(ext, Path.GetExtension(romPath), StringComparison.OrdinalIgnoreCase)))
+            {
+                status = $"{Path.GetFileName(romPath)} is not a {selectedCore.DisplayName} ROM "
+                         + $"(supports: {string.Join(" ", selectedCore.Extensions)}).";
+                return;
+            }
+
             var resolvedPath = ResolveRomPath(romPath);
             if (core.LoadGame(resolvedPath))
             {
@@ -1546,14 +1559,19 @@ public sealed class EmulatorService : IDisposable
             }
         }
 
-        if (entry == null && archive.Entries.Count == 1)
+        // Cores that declare no extensions keep the legacy single-entry guess;
+        // otherwise an archive without a ROM for the selected core fails here
+        // instead of feeding foreign content to the core.
+        if (entry == null && archive.Entries.Count == 1
+            && selectedCore is not { Extensions.Length: > 0 })
         {
             entry = archive.Entries[0];
         }
 
         if (entry == null)
         {
-            throw new InvalidOperationException("No compatible ROM found inside the archive.");
+            throw new InvalidOperationException(
+                $"No {selectedCore?.DisplayName ?? "compatible"} ROM found inside the archive.");
         }
 
         var extractPath = Path.Combine(tempDir, entry.Name);
