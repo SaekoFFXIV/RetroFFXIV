@@ -141,6 +141,19 @@ public sealed class ControlMsg
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Collections.Generic.List<string>? Keys { get; set; }
 
+    // Server-side friends list (owned by the relay, keyed by uid).
+    [JsonPropertyName("friend_key")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FriendKey { get; set; }
+
+    [JsonPropertyName("friend_name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FriendName { get; set; }
+
+    [JsonPropertyName("friends")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public System.Collections.Generic.List<FriendInfo>? Friends { get; set; }
+
     [JsonPropertyName("live")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Collections.Generic.List<LivePlayerInfo>? Live { get; set; }
@@ -189,6 +202,16 @@ public sealed class LivePlayerInfo
 
     [JsonPropertyName("viewers")]
     public int Viewers { get; set; }
+}
+
+// One entry of the relay-owned friends list.
+public sealed class FriendInfo
+{
+    [JsonPropertyName("key")]
+    public string Key { get; set; } = "";
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
 }
 
 public sealed class OnlinePlayerInfo

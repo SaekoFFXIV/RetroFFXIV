@@ -127,6 +127,16 @@ public sealed class EmulatorService : IDisposable
     private bool syncCheckInFlight;
     private string? watchError;
 
+    // Friends roster — the relay owns it (keyed by the XIVAuth identity), so
+    // a config reset or a new machine cannot lose friendships. This is the
+    // local working copy: seeded from the config cache, reconciled on sync.
+    private readonly List<SyncFriend> syncFriends;
+    private readonly object friendsLock = new();
+    private readonly HashSet<string> offlineFriendRemovals = new();
+    private bool friendsFetched;
+    private bool friendsSyncInFlight;
+    private DateTime lastFriendsSync = DateTime.MinValue;
+
     // Player ID registration with the relay (tied to the XIVAuth account).
     private bool playerRegistering;
     private string? playerRegError;
@@ -191,6 +201,8 @@ public sealed class EmulatorService : IDisposable
         this.gameGui = gameGui;
         this.objectTable = objectTable;
 
+        syncFriends = new List<SyncFriend>(config.SyncFriends);
+
         var pluginDir = pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty;
         coreManager = new CoreManager(
             pluginDir,
@@ -210,6 +222,9 @@ public sealed class EmulatorService : IDisposable
         xivAuth = new XivAuthService(config, msg => log.Information("[XIVAuth] {Msg}", msg), SaveConfig);
         xivAuth.StateChanged += () =>
         {
+            // Roster is per relay identity — re-fetch it whenever the login
+            // state (or character) changes.
+            friendsFetched = false;
             if (xivAuth.IsLoggedIn)
                 TryRegisterPlayerId(auto: true);
             else
@@ -1955,12 +1970,14 @@ public sealed class EmulatorService : IDisposable
 
         string? watchKey = null;
         string? stopKey = null;
+        var friendKeys = new HashSet<string>(
+            FriendsSnapshot().Select(f => StreamPanel.NormalizeId(f.Key)));
 
         foreach (var player in list)
         {
             var key = StreamPanel.NormalizeId(player.PlayerId);
             var isSelf = key == StreamPanel.NormalizeId(config.PlayerId);
-            var isFriend = config.SyncFriends.Any(f => StreamPanel.NormalizeId(f.Key) == key);
+            var isFriend = friendKeys.Contains(key);
 
             if (isFriend)
                 ImGui.TextColored(new Vector4(1f, 0.9f, 0.3f, 1f), "*");
@@ -2161,11 +2178,14 @@ public sealed class EmulatorService : IDisposable
 
     private void DrawFriendRoster()
     {
+        EnsureFriendsSynced();
+
         System.Collections.Generic.Dictionary<string, LivePlayerInfo> liveSnapshot;
         lock (liveStatus)
             liveSnapshot = new System.Collections.Generic.Dictionary<string, LivePlayerInfo>(liveStatus);
 
-        var friends = config.SyncFriends
+        var roster = FriendsSnapshot();
+        var friends = roster
             .Select((friend, index) =>
             {
                 var key = StreamPanel.NormalizeId(friend.Key);
@@ -2184,7 +2204,7 @@ public sealed class EmulatorService : IDisposable
         var liveCount = liveSnapshot.Count;
         ImGui.TextUnformatted("Friends");
         ImGui.SameLine();
-        ImGui.TextDisabled($"{config.SyncFriends.Count} synced | {liveCount} live | "
+        ImGui.TextDisabled($"{roster.Count} synced | {liveCount} live | "
             + $"{streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} streams active");
 
         ImGui.SetNextItemWidth(-1);
@@ -2192,13 +2212,13 @@ public sealed class EmulatorService : IDisposable
 
         string? watchKey = null;
         string? stopKey = null;
-        int? removeIndex = null;
+        string? removeKey = null;
 
         var listHeight = Math.Min(260f, Math.Max(94f, friends.Count * 30f + 8f));
         ImGui.BeginChild("##synced_friends", new Vector2(0, listHeight), true);
         if (friends.Count == 0)
         {
-            DrawInsetTextDisabled(config.SyncFriends.Count == 0
+            DrawInsetTextDisabled(roster.Count == 0
                 ? "No friends synced yet. Add a player ID below."
                 : "No synced friends match your search.");
         }
@@ -2250,7 +2270,7 @@ public sealed class EmulatorService : IDisposable
 
             ImGui.SameLine();
             if (ImGui.SmallButton("Remove"))
-                removeIndex = friend.Index;
+                removeKey = friend.Key;
             ImGui.Separator();
             ImGui.PopID();
         }
@@ -2259,12 +2279,11 @@ public sealed class EmulatorService : IDisposable
         if (!string.IsNullOrEmpty(watchError))
             ImGui.TextColored(new Vector4(1f, 0.6f, 0.2f, 1f), watchError);
 
-        if (removeIndex.HasValue)
+        if (removeKey != null)
         {
-            var removedKey = StreamPanel.NormalizeId(config.SyncFriends[removeIndex.Value].Key);
-            config.SyncFriends.RemoveAt(removeIndex.Value);
+            var removedKey = StreamPanel.NormalizeId(removeKey);
             streamPanel?.StopWatching(removedKey);
-            SaveConfig();
+            RemoveFriendEntry(removedKey);
         }
 
         if (watchKey != null && streamPanel != null)
@@ -2290,19 +2309,17 @@ public sealed class EmulatorService : IDisposable
             {
                 watchError = "Player IDs use 6-8 letters or digits.";
             }
-            else if (config.SyncFriends.Any(friend => StreamPanel.NormalizeId(friend.Key) == normalized))
+            else if (roster.Any(friend => StreamPanel.NormalizeId(friend.Key) == normalized))
             {
                 watchError = "That player is already in your friends list.";
             }
             else
             {
-                config.SyncFriends.Add(new SyncFriend { Key = normalized, Name = syncNameInput.Trim() });
+                AddFriendEntry(normalized, syncNameInput.Trim());
                 syncIdInput = string.Empty;
                 syncNameInput = string.Empty;
                 syncFilter = string.Empty;
                 watchError = null;
-                lastSyncCheck = DateTime.MinValue;
-                SaveConfig();
             }
         }
     }
@@ -2393,25 +2410,27 @@ public sealed class EmulatorService : IDisposable
         ImGui.Spacing();
 
         PollSyncStatus();
+        EnsureFriendsSynced();
 
         // Friend list.
         ImGui.TextUnformatted("Synced friends");
         ImGui.SameLine();
         ImGui.TextDisabled($"— watching {streamPanel?.WatchCount ?? 0}/{StreamPanel.MaxStreams} streams");
 
-        if (config.SyncFriends.Count == 0)
+        var roster = FriendsSnapshot();
+        if (roster.Count == 0)
         {
             ImGui.TextWrapped("No friends synced yet. Add a friend's player ID to watch their stream.");
         }
 
-        int? removeIndex = null;
+        string? removeKey = null;
         string? watchKey = null;
         string? stopKey = null;
         string? placeKey = null;
 
-        for (var i = 0; i < config.SyncFriends.Count; i++)
+        for (var i = 0; i < roster.Count; i++)
         {
-            var friend = config.SyncFriends[i];
+            var friend = roster[i];
             var key = StreamPanel.NormalizeId(friend.Key);
 
             LivePlayerInfo? live;
@@ -2458,18 +2477,16 @@ public sealed class EmulatorService : IDisposable
 
             ImGui.SameLine();
             if (ImGui.SmallButton($"X##friend{i}"))
-                removeIndex = i;
+                removeKey = key;
         }
 
         if (!string.IsNullOrEmpty(watchError))
             ImGui.TextColored(new Vector4(1f, 0.6f, 0.2f, 1f), watchError);
 
-        if (removeIndex.HasValue)
+        if (removeKey != null)
         {
-            var removedKey = StreamPanel.NormalizeId(config.SyncFriends[removeIndex.Value].Key);
-            config.SyncFriends.RemoveAt(removeIndex.Value);
-            streamPanel?.StopWatching(removedKey);
-            SaveConfig();
+            streamPanel?.StopWatching(removeKey);
+            RemoveFriendEntry(removeKey);
         }
 
         if (watchKey != null && streamPanel != null)
@@ -2506,22 +2523,16 @@ public sealed class EmulatorService : IDisposable
             {
                 watchError = "Player IDs are 6-8 letters/digits, e.g. K7QX-4MRT.";
             }
-            else if (config.SyncFriends.Any(f => StreamPanel.NormalizeId(f.Key) == normalized))
+            else if (roster.Any(f => StreamPanel.NormalizeId(f.Key) == normalized))
             {
                 watchError = "That player is already synced.";
             }
             else
             {
-                config.SyncFriends.Add(new SyncFriend
-                {
-                    Key = normalized,
-                    Name = syncNameInput.Trim(),
-                });
+                AddFriendEntry(normalized, syncNameInput.Trim());
                 syncIdInput = string.Empty;
                 syncNameInput = string.Empty;
                 watchError = null;
-                lastSyncCheck = DateTime.MinValue; // poll right away
-                SaveConfig();
             }
         }
     }
@@ -2601,10 +2612,223 @@ public sealed class EmulatorService : IDisposable
         return null;
     }
 
+    // One text request → one text response against the relay.
+    private static async System.Threading.Tasks.Task<ControlMsg?> RelayRoundTripAsync(
+        string relayUrl, ControlMsg request)
+    {
+        using var ws = new System.Net.WebSockets.ClientWebSocket();
+        using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await ws.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), cts.Token);
+        await ws.SendAsync(
+            new ArraySegment<byte>(System.Text.Encoding.UTF8.GetBytes(request.ToJson())),
+            System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+        var buffer = new byte[16384];
+        var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+        return result.MessageType == System.Net.WebSockets.WebSocketMessageType.Text
+            ? ControlMsg.Parse(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count))
+            : null;
+    }
+
+    private bool FriendsRelayAvailable => xivAuth.IsLoggedIn
+        && !string.IsNullOrEmpty(config.PlayerId)
+        && config.PlayerIdUid == xivAuth.GetPlayerUid();
+
+    private List<SyncFriend> FriendsSnapshot()
+    {
+        lock (friendsLock)
+        {
+            return new List<SyncFriend>(syncFriends);
+        }
+    }
+
+    private void ApplyFriendsList(List<FriendInfo> list)
+    {
+        lock (friendsLock)
+        {
+            syncFriends.Clear();
+            foreach (var friend in list)
+            {
+                syncFriends.Add(new SyncFriend
+                {
+                    Key = StreamPanel.NormalizeId(friend.Key),
+                    Name = friend.Name,
+                });
+            }
+
+            config.SyncFriends = new List<SyncFriend>(syncFriends);
+        }
+
+        SaveConfig();
+        lastSyncCheck = DateTime.MinValue; // poll live status for the new roster right away
+    }
+
+    // The relay is the source of truth for the roster; call once login is up.
+    // Fetches the server list, applies any offline removals, uploads local-only
+    // entries (covers offline adds and the one-time migration of rosters that
+    // previously lived only in the client config), then adopts the server list.
+    private void EnsureFriendsSynced()
+    {
+        if (friendsSyncInFlight || friendsFetched || !FriendsRelayAvailable)
+            return;
+        if ((DateTime.UtcNow - lastFriendsSync).TotalSeconds < 10)
+            return;
+
+        lastFriendsSync = DateTime.UtcNow;
+        friendsSyncInFlight = true;
+        var relayUrl = streamPanel?.RelayUrl ?? config.RelayUrl;
+        var uid = xivAuth.GetPlayerUid();
+
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                var response = await RelayRoundTripAsync(relayUrl,
+                    new ControlMsg { Action = "friends_get", Uid = uid });
+                if (response == null)
+                    return; // network failure — try again on the next cooldown
+
+                if (response.Type != "friends_list" || response.Friends == null)
+                {
+                    // Old relay ("Unknown action") or a rejected identity:
+                    // keep the local roster and stop retrying this session.
+                    log.Information("[Sync] friends list unavailable from relay: {Msg}",
+                        response.Message ?? "no response");
+                    friendsFetched = true;
+                    return;
+                }
+
+                var server = response.Friends;
+
+                HashSet<string> removals;
+                lock (friendsLock)
+                {
+                    removals = new HashSet<string>(offlineFriendRemovals);
+                }
+
+                foreach (var key in removals)
+                {
+                    var removed = await RelayRoundTripAsync(relayUrl,
+                        new ControlMsg { Action = "friend_remove", Uid = uid, FriendKey = key });
+                    if (removed?.Type == "friends_list" && removed.Friends != null)
+                        server = removed.Friends;
+                }
+
+                lock (friendsLock)
+                {
+                    offlineFriendRemovals.Clear();
+                }
+
+                var serverKeys = new HashSet<string>(
+                    server.Select(f => StreamPanel.NormalizeId(f.Key)));
+                var local = FriendsSnapshot();
+                foreach (var friend in local)
+                {
+                    var key = StreamPanel.NormalizeId(friend.Key);
+                    if (serverKeys.Contains(key))
+                        continue;
+
+                    var added = await RelayRoundTripAsync(relayUrl,
+                        new ControlMsg
+                        {
+                            Action = "friend_add",
+                            Uid = uid,
+                            FriendKey = key,
+                            FriendName = friend.Name,
+                        });
+                    if (added?.Type == "friends_list" && added.Friends != null)
+                        server = added.Friends;
+                }
+
+                ApplyFriendsList(server);
+                friendsFetched = true;
+            }
+            catch (Exception ex)
+            {
+                log.Verbose($"[Sync] friends sync failed: {ex.Message}");
+            }
+            finally
+            {
+                friendsSyncInFlight = false;
+            }
+        });
+    }
+
+    private void AddFriendEntry(string normalizedKey, string name)
+    {
+        lock (friendsLock)
+        {
+            syncFriends.Add(new SyncFriend { Key = normalizedKey, Name = name });
+            config.SyncFriends = new List<SyncFriend>(syncFriends);
+        }
+
+        SaveConfig();
+        lastSyncCheck = DateTime.MinValue;
+        SyncFriendMutation(new ControlMsg
+        {
+            Action = "friend_add",
+            Uid = xivAuth.GetPlayerUid(),
+            FriendKey = normalizedKey,
+            FriendName = name,
+        });
+    }
+
+    private void RemoveFriendEntry(string normalizedKey)
+    {
+        lock (friendsLock)
+        {
+            syncFriends.RemoveAll(friend => StreamPanel.NormalizeId(friend.Key) == normalizedKey);
+            config.SyncFriends = new List<SyncFriend>(syncFriends);
+        }
+
+        SaveConfig();
+        SyncFriendMutation(new ControlMsg
+        {
+            Action = "friend_remove",
+            Uid = xivAuth.GetPlayerUid(),
+            FriendKey = normalizedKey,
+        });
+    }
+
+    // Push one roster mutation to the relay and adopt its response. Offline,
+    // the local edit stands and the next sync reconciles it (removals queue
+    // explicitly; adds are just local-only entries the sync will upload).
+    private void SyncFriendMutation(ControlMsg request)
+    {
+        if (!FriendsRelayAvailable)
+        {
+            if (request.Action == "friend_remove" && request.FriendKey != null)
+            {
+                lock (friendsLock)
+                {
+                    offlineFriendRemovals.Add(request.FriendKey);
+                }
+            }
+
+            return;
+        }
+
+        var relayUrl = streamPanel?.RelayUrl ?? config.RelayUrl;
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                var response = await RelayRoundTripAsync(relayUrl, request);
+                if (response?.Type == "friends_list" && response.Friends != null)
+                    ApplyFriendsList(response.Friends);
+            }
+            catch (Exception ex)
+            {
+                log.Verbose($"[Sync] friend update failed: {ex.Message}");
+            }
+        });
+    }
+
     // Poll the relay for which synced friends are live (every few seconds).
     private void PollSyncStatus()
     {
-        if (streamPanel == null || config.SyncFriends.Count == 0)
+        var roster = FriendsSnapshot();
+        if (streamPanel == null || roster.Count == 0)
             return;
         if (syncCheckInFlight)
             return;
@@ -2614,7 +2838,7 @@ public sealed class EmulatorService : IDisposable
         lastSyncCheck = DateTime.UtcNow;
         syncCheckInFlight = true;
 
-        var keys = config.SyncFriends
+        var keys = roster
             .Select(f => StreamPanel.NormalizeId(f.Key))
             .Where(k => k.Length >= 6)
             .Distinct()

@@ -338,6 +338,85 @@ async def test_netplay():
     await p3.close()
 
 
+async def test_friends():
+    print("\n── Friends (server-side roster) ──")
+
+    ws = await websockets.connect(RELAY)
+
+    # Friends require a registered identity.
+    await ws.send(json.dumps({"action": "friends_get", "uid": "friends-unregistered"}))
+    r = json.loads(await ws.recv())
+    ok("friends_get without registration rejected", r.get("type") == "error", str(r))
+
+    ra = await register(ws, "friends-uid-aaaa", "Alice")
+    rb_ws = await websockets.connect(RELAY)
+    rb = await register(rb_ws, "friends-uid-bbbb", "Bob")
+    await rb_ws.close()
+
+    # New accounts start with an empty roster.
+    await ws.send(json.dumps({"action": "friends_get", "uid": "friends-uid-aaaa"}))
+    r = json.loads(await ws.recv())
+    ok("friends_get empty roster", r.get("type") == "friends_list"
+       and r.get("friends") == [], str(r))
+
+    # Malformed player IDs are rejected.
+    await ws.send(json.dumps({
+        "action": "friend_add", "uid": "friends-uid-aaaa",
+        "friend_key": "!!", "friend_name": "Broken",
+    }))
+    r = json.loads(await ws.recv())
+    ok("friend_add bad key rejected", r.get("type") == "error", str(r))
+
+    # Add Bob by player ID.
+    await ws.send(json.dumps({
+        "action": "friend_add", "uid": "friends-uid-aaaa",
+        "friend_key": rb["player_id"], "friend_name": "Bobby",
+    }))
+    r = json.loads(await ws.recv())
+    friends = r.get("friends", [])
+    ok("friend_add returns roster", r.get("type") == "friends_list"
+       and len(friends) == 1 and friends[0]["name"] == "Bobby"
+       and friends[0]["key"].replace("-", "") == rb["player_id"].replace("-", ""), str(r))
+
+    # Re-adding is an upsert: the nickname updates, no duplicate.
+    await ws.send(json.dumps({
+        "action": "friend_add", "uid": "friends-uid-aaaa",
+        "friend_key": rb["player_id"], "friend_name": "Robert",
+    }))
+    r = json.loads(await ws.recv())
+    friends = r.get("friends", [])
+    ok("friend_add upserts", r.get("type") == "friends_list"
+       and len(friends) == 1 and friends[0]["name"] == "Robert", str(r))
+
+    # The roster belongs to the identity, not the socket: a fresh
+    # connection for the same uid sees the same list.
+    ws2 = await websockets.connect(RELAY)
+    await ws2.send(json.dumps({"action": "friends_get", "uid": "friends-uid-aaaa"}))
+    r = json.loads(await ws2.recv())
+    ok("roster survives reconnect", r.get("type") == "friends_list"
+       and len(r.get("friends", [])) == 1, str(r))
+    await ws2.close()
+
+    # Remove Bob; removing again is a no-op.
+    await ws.send(json.dumps({
+        "action": "friend_remove", "uid": "friends-uid-aaaa",
+        "friend_key": rb["player_id"],
+    }))
+    r = json.loads(await ws.recv())
+    ok("friend_remove empties roster", r.get("type") == "friends_list"
+       and r.get("friends") == [], str(r))
+
+    await ws.send(json.dumps({
+        "action": "friend_remove", "uid": "friends-uid-aaaa",
+        "friend_key": rb["player_id"],
+    }))
+    r = json.loads(await ws.recv())
+    ok("friend_remove idempotent", r.get("type") == "friends_list"
+       and r.get("friends") == [], str(r))
+
+    await ws.close()
+
+
 async def main():
     print("Retro FFXIV Relay integration test")
     print(f"Target: {RELAY}")
@@ -345,6 +424,7 @@ async def main():
     try:
         await test_registration_and_live()
         await test_presence()
+        await test_friends()
         await test_netplay()
     except ConnectionRefusedError:
         print("\n✗ Cannot connect to relay — is it running?  (python server.py)")

@@ -81,6 +81,40 @@ def generate_player_id() -> str:
     return format_player_id(core)
 
 
+# Friends lists are stored per uid in the registry — the roster belongs to
+# the relay identity, not the client config (a config reset must not be able
+# to delete a friendship).
+FRIENDS_MAX = 100
+FRIEND_NAME_MAX = 64
+
+
+def friend_key_valid(normalized: str) -> bool:
+    # Same acceptance rule as the clients: 6-8 ASCII letters/digits
+    # (8-char relay-issued IDs, plus headroom).
+    return 6 <= len(normalized) <= 8 and normalized.isalnum()
+
+
+def _sanitize_friends(raw: object) -> list[dict]:
+    friends: list[dict] = []
+    seen: set[str] = set()
+    if not isinstance(raw, list):
+        return friends
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = normalize_player_id(str(item.get("key", "")))
+        if not friend_key_valid(key) or key in seen:
+            continue
+        seen.add(key)
+        friends.append({
+            "key": format_player_id(key),
+            "name": str(item.get("name", ""))[:FRIEND_NAME_MAX],
+        })
+        if len(friends) >= FRIENDS_MAX:
+            break
+    return friends
+
+
 @dataclass
 class OnlinePlayer:
     uid: str
@@ -143,7 +177,11 @@ def load_registry() -> None:
         pid = normalize_player_id(entry.get("player_id", ""))
         if not pid or pid in registry_by_id:
             continue
-        registry[uid] = {"player_id": format_player_id(pid), "name": entry.get("name", "")}
+        registry[uid] = {
+            "player_id": format_player_id(pid),
+            "name": entry.get("name", ""),
+            "friends": _sanitize_friends(entry.get("friends")),
+        }
         registry_by_id[pid] = uid
     log.info("registry loaded: %d players", len(registry))
 
@@ -173,7 +211,7 @@ def register_player(uid: str, name: str) -> str:
     while pid in registry_by_id:
         pid = normalize_player_id(generate_player_id())
 
-    registry[uid] = {"player_id": format_player_id(pid), "name": name}
+    registry[uid] = {"player_id": format_player_id(pid), "name": name, "friends": []}
     registry_by_id[pid] = uid
     save_registry()
     log.info("registered %s → %s (%s)", uid[:8], format_player_id(pid), name or "anonymous")
@@ -412,6 +450,25 @@ async def _handle_text(ws: WebSocket, raw: str) -> None:
     elif action == "sync_check":
         ids = [normalize_player_id(k) for k in msg.get("keys", []) if isinstance(k, str)]
         await _handle_sync_check(ws, ids)
+    elif action == "friends_get":
+        uid = msg.get("uid", "")
+        if not uid:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
+            return
+        await _handle_friends_get(ws, uid)
+    elif action == "friend_add":
+        uid = msg.get("uid", "")
+        if not uid:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
+            return
+        await _handle_friend_add(
+            ws, uid, msg.get("friend_key", ""), str(msg.get("friend_name", "")))
+    elif action == "friend_remove":
+        uid = msg.get("uid", "")
+        if not uid:
+            await _safe_send_text(ws, {"type": "error", "message": "Missing uid"})
+            return
+        await _handle_friend_remove(ws, uid, msg.get("friend_key", ""))
     else:
         await _safe_send_text(ws, {"type": "error", "message": f"Unknown action: {action}"})
 
@@ -684,6 +741,65 @@ async def _handle_sync_check(ws: WebSocket, ids: list[str]) -> None:
                 "viewers": len(channel.subscribers),
             })
     await _safe_send_text(ws, {"type": "sync_status", "live": live})
+
+
+async def _handle_friends_get(ws: WebSocket, uid: str) -> None:
+    entry = registry.get(uid)
+    if entry is None:
+        await _safe_send_text(ws, {"type": "error", "message": "Not registered"})
+        return
+    await _safe_send_text(ws, {
+        "type": "friends_list", "friends": entry.get("friends", []),
+    })
+
+
+async def _handle_friend_add(ws: WebSocket, uid: str, friend_key: str, friend_name: str) -> None:
+    entry = registry.get(uid)
+    if entry is None:
+        await _safe_send_text(ws, {"type": "error", "message": "Not registered"})
+        return
+
+    key = normalize_player_id(str(friend_key))
+    if not friend_key_valid(key):
+        await _safe_send_text(ws, {
+            "type": "error", "message": "Player IDs use 6-8 letters or digits.",
+        })
+        return
+
+    name = friend_name.strip()[:FRIEND_NAME_MAX]
+    friends = entry.setdefault("friends", [])
+
+    existing = next(
+        (f for f in friends if normalize_player_id(f.get("key", "")) == key), None)
+    if existing is not None:
+        # Idempotent upsert: re-adding updates the nickname.
+        existing["name"] = name
+    else:
+        if len(friends) >= FRIENDS_MAX:
+            await _safe_send_text(ws, {"type": "error", "message": "Friends list is full"})
+            return
+        friends.append({"key": format_player_id(key), "name": name})
+        log.info("friends %s added %s (%s)", entry["player_id"],
+                 format_player_id(key), name or "unnamed")
+
+    save_registry()
+    await _safe_send_text(ws, {"type": "friends_list", "friends": friends})
+
+
+async def _handle_friend_remove(ws: WebSocket, uid: str, friend_key: str) -> None:
+    entry = registry.get(uid)
+    if entry is None:
+        await _safe_send_text(ws, {"type": "error", "message": "Not registered"})
+        return
+
+    key = normalize_player_id(str(friend_key))
+    friends = entry.get("friends", [])
+    remaining = [f for f in friends if normalize_player_id(f.get("key", "")) != key]
+    if len(remaining) != len(friends):
+        entry["friends"] = remaining
+        save_registry()
+
+    await _safe_send_text(ws, {"type": "friends_list", "friends": entry.get("friends", [])})
 
 
 async def _handle_binary(ws: WebSocket, data: bytes) -> None:
