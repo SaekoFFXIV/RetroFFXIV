@@ -82,6 +82,14 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
     private readonly Dictionary<string, string> variableOverrides = new(builtinOverrides);
 
+    // Aspect ratios for cores that report square pixels (aspect 0). Without
+    // this they fall back to the legacy 3:2 screens, which stretches the
+    // Game Boy's 160x144 panel.
+    private static readonly (string Library, float Aspect)[] builtinAspects =
+    {
+        ("Gambatte", 10f / 9f),
+    };
+
     // Frontend-set option values (future options UI, diagnostics). Applied at
     // the next SET_VARIABLES; unknown keys are kept and matched later.
     public void OverrideVariable(string key, string value) => variableOverrides[key] = value;
@@ -382,13 +390,30 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         BaseHeight = (int)av.Geometry.BaseHeight;
         Fps = av.Timing.Fps > 0 ? av.Timing.Fps : 60.0;
         SampleRate = av.Timing.SampleRate > 0 ? av.Timing.SampleRate : 32000.0;
-        AspectRatio = av.Geometry.AspectRatio > 0f ? av.Geometry.AspectRatio : 0.0;
+        AspectRatio = av.Geometry.AspectRatio > 0f
+            ? av.Geometry.AspectRatio
+            : LookupBuiltinAspect();
         ShutdownRequested = false;
         IsGameLoaded = true;
 
         // The GS of a hardware-rendering core only opens once the frontend
         // signals that its context is live.
         hwContextReset?.Invoke();
+    }
+
+    // Canonical display aspect for square-pixel cores that report 0. Returns
+    // 0 when no entry matches, keeping the legacy 3:2 screen fallback.
+    private float LookupBuiltinAspect()
+    {
+        foreach (var (library, aspect) in builtinAspects)
+        {
+            if (LibraryName.Contains(library, StringComparison.OrdinalIgnoreCase))
+            {
+                return aspect;
+            }
+        }
+
+        return 0f;
     }
 
     // Begin running the emulation on its own thread.

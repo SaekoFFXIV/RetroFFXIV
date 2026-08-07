@@ -34,10 +34,20 @@ This plugin ships libretro emulator cores: **bsnes** (SNES) as
   - The shipped Windows x64 binary is rebuilt locally with the corresponding
     source patch in `native/lrps2/windows-large-iso.patch`.
 
-The GPLv3 license text is available at https://www.gnu.org/licenses/gpl-3.0.html
-and the MPL-2.0 license text at https://www.mozilla.org/MPL/2.0/. Under the
-GPLv3 you are entitled to the corresponding source code of the GPL-licensed
-cores; it is available at the repositories linked above.
+- **Gambatte** — a Game Boy / Game Boy Color emulator
+  (`cores/gambatte_libretro.dll`).
+  - Copyright (c) Gambatte contributors.
+  - License: GNU General Public License v2.0 (GPLv2).
+  - Source code: https://github.com/libretro/gambatte
+  - Binary obtained from
+    https://buildbot.libretro.com/nightly/windows/x86_64/latest/.
+
+The GPLv2 license text is available at
+https://www.gnu.org/licenses/gpl-2.0.html, the GPLv3 license text at
+https://www.gnu.org/licenses/gpl-3.0.html, and the MPL-2.0 license text at
+https://www.mozilla.org/MPL/2.0/. Under the GPL you are entitled to the
+corresponding source code of the GPL-licensed cores; it is available at the
+repositories linked above.
 
 This plugin also ships **OpenH264** for H.264 video encoding/decoding used in
 the streaming feature.
