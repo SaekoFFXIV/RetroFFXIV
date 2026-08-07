@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using EmulatorStream;
@@ -42,7 +43,6 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private RetroInputPollDelegate inputPollCb = null!;
     private RetroInputStateDelegate inputStateCb = null!;
     private RetroLogPrintfDelegate logPrintfCb = null!;
-
     // Save-state support (retro_serialize / retro_unserialize).
     private RetroSerializeSizeDelegate serializeSize = null!;
     private RetroSerializeDelegate serialize = null!;
@@ -72,13 +72,19 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private readonly Dictionary<string, string> variableRaws = new();
 
     // Per-option overrides for cores whose first-listed default does not fit
-    // this frontend. LRPS2 defaults its renderer to Auto, which wants a
-    // hardware context we cannot provide; the CPU software renderer feeds the
-    // ordinary video-refresh path instead.
-    private static readonly Dictionary<string, string> variableOverrides = new()
+    // this frontend. LRPS2 defaults its renderer to Auto and expects a complete
+    // hardware-rendering callback bridge. Keep the stable CPU path as the beta
+    // default until that bridge is fully wired.
+    private static readonly Dictionary<string, string> builtinOverrides = new()
     {
         ["pcsx2_renderer"] = "Software (SW)",
     };
+
+    private readonly Dictionary<string, string> variableOverrides = new(builtinOverrides);
+
+    // Frontend-set option values (future options UI, diagnostics). Applied at
+    // the next SET_VARIABLES; unknown keys are kept and matched later.
+    public void OverrideVariable(string key, string value) => variableOverrides[key] = value;
 
     private Thread? thread;
     private volatile bool running;
@@ -131,6 +137,19 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     // thread.
     public Action<int, string>? LogReceived { get; set; }
 
+    // Diagnostic: every environment query and whether we answered it.
+    public Action<uint, bool>? EnvironmentTrace { get; set; }
+
+    // Hardware presentation context for cores that render on the GPU (LRPS2).
+    // When a core's SET_HW_RENDER is accepted, frames are read back from this
+    // context after each retro_run instead of arriving via video refresh.
+    public IHwRenderContext? HwRender { get; set; }
+
+    private RetroHwContextResetDelegate? hwContextReset;
+    private RetroHwContextResetDelegate? hwContextDestroy;
+    private volatile bool hwActive;
+    private RetroCoreOptionsUpdateDisplayDelegate? optionVisibilityCallback;
+
     // CRT vsnprintf, used to format the core's va_list log lines natively.
     private static readonly VsnprintfDelegate? vsnprintfCall = ResolveVsnprintf();
 
@@ -172,6 +191,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
     public string SystemDirectory { get; set; } = string.Empty;
     public string SaveDirectory { get; set; } = string.Empty;
+    public string? LastLoadError { get; private set; }
 
     public void Load(string corePath)
     {
@@ -207,7 +227,6 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         inputPollCb = InputPoll;
         inputStateCb = InputStateCallback;
         logPrintfCb = LogPrintf;
-
         systemDirPtr = Marshal.StringToHGlobalAnsi(SystemDirectory);
         saveDirPtr = Marshal.StringToHGlobalAnsi(SaveDirectory);
 
@@ -236,6 +255,13 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
 
         UnloadGame();
+        LastLoadError = null;
+
+        if (!ValidatePs2ContentPrerequisites(romPath, out var prerequisiteError))
+        {
+            LastLoadError = prerequisiteError;
+            return false;
+        }
 
         var pathPtr = Marshal.StringToHGlobalAnsi(romPath);
         try
@@ -271,6 +297,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
             if (!loadGame(ref gameInfo))
             {
+                LastLoadError = "The native core refused to load this content.";
                 return false;
             }
         }
@@ -280,7 +307,49 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
 
         CaptureAvInfo();
+        // LRPS2 starts its native CPU thread from retro_load_game(), but opens
+        // the GS device from the first retro_run().  Keep that transition
+        // adjacent: content boot can otherwise reach the native GS loop on a
+        // worker thread before the frontend has opened the device.
+        RunFrame();
         return true;
+    }
+
+    private bool ValidatePs2ContentPrerequisites(string contentPath, out string error)
+    {
+        error = string.Empty;
+        var isPs2 = LibraryName.Contains("LRPS2", StringComparison.OrdinalIgnoreCase)
+            || LibraryName.Contains("PCSX2", StringComparison.OrdinalIgnoreCase);
+        var extension = Path.GetExtension(contentPath).ToLowerInvariant();
+        var isDiscImage = extension is ".iso" or ".ciso" or ".cue" or ".bin" or ".gz"
+            or ".chd" or ".cso" or ".zso" or ".mdf" or ".nrg" or ".dump" or ".img" or ".m3u";
+        if (!isPs2 || !isDiscImage)
+        {
+            return true;
+        }
+
+        // LRPS2 accepts a standalone 4-8 MB main BIOS. ROM1/ROM2/EROM/NVM
+        // companions are optional; when supplied, LRPS2 matches them by the
+        // main BIOS basename. Do not reject a valid single-file BIOS or demand
+        // unrelated generic companion names here.
+        var biosDirectory = Path.Combine(SystemDirectory, "pcsx2", "bios");
+        if (!Directory.Exists(biosDirectory))
+        {
+            error = $"PS2 BIOS folder is missing: {biosDirectory}";
+            return false;
+        }
+
+        var hasMainBios = Directory.EnumerateFiles(biosDirectory)
+            .Select(path => new FileInfo(path).Length)
+            .Any(length => length >= 4 * 1024 * 1024 && length <= 8 * 1024 * 1024);
+        if (hasMainBios)
+        {
+            return true;
+        }
+
+        error = "PS2 BIOS folder contains no 4-8 MB main BIOS dump. Add a legal PS2 BIOS to "
+            + $"{biosDirectory}; optional companion dumps must share its basename.";
+        return false;
     }
 
     // Boot without content (cores that advertised no-game support, e.g. the
@@ -301,6 +370,8 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
 
         CaptureAvInfo();
+        // Keep no-content BIOS boot on the same lifecycle as content boot.
+        RunFrame();
         return true;
     }
 
@@ -314,6 +385,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         AspectRatio = av.Geometry.AspectRatio > 0f ? av.Geometry.AspectRatio : 0.0;
         ShutdownRequested = false;
         IsGameLoaded = true;
+
+        // The GS of a hardware-rendering core only opens once the frontend
+        // signals that its context is live.
+        hwContextReset?.Invoke();
     }
 
     // Begin running the emulation on its own thread.
@@ -339,6 +414,12 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         {
             unloadGame();
             IsGameLoaded = false;
+        }
+
+        if (hwActive)
+        {
+            hwContextDestroy?.Invoke();
+            hwActive = false;
         }
 
         if (romPinned)
@@ -370,12 +451,31 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         {
             if (IsGameLoaded)
             {
-                run();
+                RunCoreFrame();
             }
         }
         finally
         {
             coreGate.Release();
+        }
+    }
+
+    // Hardware-rendering cores present into the frontend's context instead of
+    // calling video refresh: bind the target, run, read the frame back.
+    private void RunCoreFrame()
+    {
+        if (hwActive && HwRender != null)
+        {
+            HwRender.BeginFrame(BaseWidth, BaseHeight);
+            run();
+            if (HwRender.TryReadFrame(out var rgba, out var w, out var h))
+            {
+                PushFrame(rgba, w, h);
+            }
+        }
+        else
+        {
+            run();
         }
     }
 
@@ -484,7 +584,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 PreFrame?.Invoke();
                 if (IsGameLoaded)
                 {
-                    run();
+                    RunCoreFrame();
                 }
             }
             finally
@@ -576,6 +676,13 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
     private bool Environment(uint cmd, IntPtr data)
     {
+        var handled = EnvironmentCore(cmd, data);
+        EnvironmentTrace?.Invoke(cmd, handled);
+        return handled;
+    }
+
+    private bool EnvironmentCore(uint cmd, IntPtr data)
+    {
         switch (cmd)
         {
             case Libretro.EnvSetPixelFormat:
@@ -621,11 +728,26 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
                 // resolutions freely). Keep the base dimensions current; an
                 // explicit aspect overrides the load-time one.
                 var geometry = Marshal.PtrToStructure<RetroGameGeometry>(data);
-                BaseWidth = (int)geometry.BaseWidth;
-                BaseHeight = (int)geometry.BaseHeight;
-                if (geometry.AspectRatio > 0f)
+                ApplyGeometry(geometry);
+                return true;
+            }
+
+            case Libretro.EnvSetSystemAvInfo:
+            {
+                // Full AV renegotiation (LRPS2 reports PS2 video-mode changes
+                // this way). Same geometry semantics as SET_GEOMETRY, plus
+                // timing: the run loop and audio resampler follow the new
+                // rate on their next cycle.
+                var av = Marshal.PtrToStructure<RetroSystemAvInfo>(data);
+                ApplyGeometry(av.Geometry);
+                if (av.Timing.Fps > 0)
                 {
-                    AspectRatio = geometry.AspectRatio;
+                    Fps = av.Timing.Fps;
+                }
+
+                if (av.Timing.SampleRate > 0)
+                {
+                    SampleRate = av.Timing.SampleRate;
                 }
 
                 return true;
@@ -633,6 +755,55 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
             case Libretro.EnvGetLogInterface:
                 Marshal.StructureToPtr(new RetroLogCallback { Log = logPrintfCb }, data, false);
+                return true;
+
+            case Libretro.EnvSetInputDescriptors:
+                // The PS2 core uses the standard joypad callbacks and does not
+                // require per-button descriptor metadata.
+                return true;
+
+            case Libretro.EnvSetCoreOptionsDisplay:
+                // Dynamic option visibility is UI-only for this frontend; the
+                // core still owns and reads the option values.
+                return true;
+
+            case Libretro.EnvSetCoreOptionsUpdateDisplayCallback:
+            {
+                var callback = Marshal.PtrToStructure<RetroCoreOptionsUpdateDisplayCallback>(data);
+                optionVisibilityCallback = callback.Callback;
+                return optionVisibilityCallback != null;
+            }
+
+            case Libretro.EnvSetHwRender:
+            {
+                // Without a provider this frontend stays software-frame only
+                // and cores must use their CPU renderer. Accepting without a
+                // real context (as a misparsed geometry call once did) sends
+                // LRPS2 down a hardware path that crashes on the missing GS.
+                var hwCb = Marshal.PtrToStructure<RetroHwRenderCallback>(data);
+                if (HwRender == null || hwCb.ContextType != HwRender.ContextType)
+                {
+                    return false;
+                }
+
+                hwContextReset = Marshal.GetDelegateForFunctionPointer<RetroHwContextResetDelegate>(hwCb.ContextReset);
+                hwContextDestroy = hwCb.ContextDestroy != IntPtr.Zero
+                    ? Marshal.GetDelegateForFunctionPointer<RetroHwContextResetDelegate>(hwCb.ContextDestroy)
+                    : null;
+                hwActive = true;
+                return true;
+            }
+
+            case Libretro.EnvGetHwRenderInterface:
+                return hwActive && HwRender != null && HwRender.FillInterface(data);
+
+            case Libretro.EnvGetPreferredHwRender:
+                if (HwRender == null)
+                {
+                    return false;
+                }
+
+                Marshal.WriteInt32(data, HwRender.ContextType);
                 return true;
 
             case Libretro.EnvSetRotation:
@@ -646,6 +817,16 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
             default:
                 return false;
+        }
+    }
+
+    private void ApplyGeometry(RetroGameGeometry geometry)
+    {
+        BaseWidth = (int)geometry.BaseWidth;
+        BaseHeight = (int)geometry.BaseHeight;
+        if (geometry.AspectRatio > 0f)
+        {
+            AspectRatio = geometry.AspectRatio;
         }
     }
 
@@ -728,6 +909,11 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             ConvertRow(src + y * pitchBytes, rgba, y * w * 4, w, pixelFormat);
         }
 
+        PushFrame(rgba, w, h);
+    }
+
+    private void PushFrame(byte[] rgba, int w, int h)
+    {
         lock (frameLock)
         {
             frame = rgba;

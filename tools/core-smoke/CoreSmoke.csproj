@@ -10,8 +10,14 @@
     <AssemblyName>CoreSmoke</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="2.3.0" />
+    <PackageReference Include="Vortice.DXGI" Version="2.3.0" />
+  </ItemGroup>
+  <ItemGroup>
     <Compile Include="..\..\SnesEmulator\Emulation\Libretro.cs" />
     <Compile Include="..\..\SnesEmulator\Emulation\RetroCore.cs" />
+    <Compile Include="..\..\SnesEmulator\Emulation\IHwRenderContext.cs" />
+    <Compile Include="..\..\SnesEmulator\Rendering\D3D11HwContext.cs" />
     <Compile Include="..\..\EmulatorStream\IEmulatorBackend.cs" />
   </ItemGroup>
 </Project>

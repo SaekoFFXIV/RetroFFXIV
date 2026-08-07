@@ -1,0 +1,50 @@
+diff --git a/libretro/libretro-common/vfs/vfs_implementation.c b/libretro/libretro-common/vfs/vfs_implementation.c
+index 8a65413..1898d01 100644
+--- a/libretro/libretro-common/vfs/vfs_implementation.c
++++ b/libretro/libretro-common/vfs/vfs_implementation.c
+@@ -340,7 +340,15 @@ int64_t retro_vfs_file_seek_internal(
+    }
+ #endif
+ 
++#if defined(_WIN32) && !defined(_XBOX)
++   /* Windows' lseek/_lseek takes a 32-bit long offset. ISO images commonly
++    * exceed that range, and FREQUENT_ACCESS reaches this descriptor path
++    * before the file mapping has been created. Use the CRT's 64-bit seek so
++    * large DVD images can be sized and mapped instead of failing to open. */
++   return _lseeki64(stream->fd, offset, whence) == -1 ? -1 : 0;
++#else
+    return lseek(stream->fd, (off_t)offset, whence) == -1 ? -1 : 0;
++#endif
+ }
+ 
+ /**
+@@ -895,7 +903,11 @@ int64_t retro_vfs_file_tell_impl(libretro_vfs_implementation_file *stream)
+          RETRO_VFS_FILE_ACCESS_HINT_FREQUENT_ACCESS))
+       return stream->mappos;
+ #endif
++#if defined(_WIN32) && !defined(_XBOX)
++   return _lseeki64(stream->fd, 0, SEEK_CUR);
++#else
+    return lseek(stream->fd, 0, SEEK_CUR);
++#endif
+ }
+ 
+ int64_t retro_vfs_file_seek_impl(libretro_vfs_implementation_file *stream,
+diff --git a/libretro/main.cpp b/libretro/main.cpp
+index 5dc3a03..d32d23c 100644
+--- a/libretro/main.cpp
++++ b/libretro/main.cpp
+@@ -1872,7 +1872,12 @@ static bool libretro_select_hw_render(void)
+ 
+ static void cpu_thread_entry(VMBootParameters boot_params)
+ {
+-	VMManager::Initialize(boot_params);
++	if (!VMManager::Initialize(boot_params))
++	{
++		if (log_cb)
++			log_cb(RETRO_LOG_ERROR, "LRPS2 failed to initialize the virtual machine.\n");
++		return;
++	}
+ 	VMManager::SetState(VMState::Running);
+ 
+ 	while (VMManager::GetState() != VMState::Shutdown)

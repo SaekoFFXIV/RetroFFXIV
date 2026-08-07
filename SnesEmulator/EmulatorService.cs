@@ -6,12 +6,14 @@ using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using SnesEmulator.Emulation;
+using SnesEmulator.Rendering;
 using SnesEmulator.Streaming;
 using EmulatorStream;
 using FfxivCameraManager = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CameraManager;
@@ -133,6 +135,7 @@ public sealed class EmulatorService : IDisposable
     private readonly System.Collections.Generic.Dictionary<string, (byte[] Rgba, int W, int H)> dxWatchFrames = new();
 
     private RetroCore? core;
+    private D3D11HwContext? hwRender;
     private AudioPlayer? audio;
     private IDalamudTextureWrap? texture;
     private int textureWidth;
@@ -1413,11 +1416,20 @@ public sealed class EmulatorService : IDisposable
             // LRPS2 looks for PS2 BIOS dumps here; the plugin creates the
             // layout but never ships BIOS (user-provided legal dumps only).
             Directory.CreateDirectory(Path.Combine(systemDir, "pcsx2", "bios"));
+            InstallBundledPs2GameIndex(systemDir);
+
+            hwRender?.Dispose();
+            hwRender = D3D11HwContext.TryCreate();
+            if (hwRender == null)
+            {
+                log.Warning("No D3D11 hardware render context; hardware-rendering cores will not load");
+            }
 
             var newCore = new RetroCore
             {
                 SystemDirectory = systemDir,
                 SaveDirectory = saveDir,
+                HwRender = hwRender,
                 InputState = inputManager.GetInputState,
                 BackgroundError = ex => log.Error(ex,
                     "Emulator thread stopped after a contained core failure"),
@@ -1441,6 +1453,31 @@ public sealed class EmulatorService : IDisposable
         {
             status = $"Failed to load core: {ex.Message}";
             log.Error(ex, "Failed to load the libretro core from {Path}", path);
+        }
+    }
+
+    private void InstallBundledPs2GameIndex(string systemDirectory)
+    {
+        var pluginDirectory = pluginInterface.AssemblyLocation.DirectoryName;
+        if (string.IsNullOrEmpty(pluginDirectory))
+        {
+            return;
+        }
+
+        var bundled = Path.Combine(pluginDirectory, "resources", "GameIndex.yaml");
+        if (!File.Exists(bundled))
+        {
+            return;
+        }
+
+        var destinationDirectory = Path.Combine(systemDirectory, "pcsx2", "resources");
+        var destination = Path.Combine(destinationDirectory, "GameIndex.yaml");
+        Directory.CreateDirectory(destinationDirectory);
+
+        if (!File.Exists(destination)
+            || File.GetLastWriteTimeUtc(bundled) > File.GetLastWriteTimeUtc(destination))
+        {
+            File.Copy(bundled, destination, overwrite: true);
         }
     }
 
@@ -1527,7 +1564,7 @@ public sealed class EmulatorService : IDisposable
             }
             else
             {
-                status = "The core refused to load this ROM.";
+                status = core.LastLoadError ?? "The core refused to load this ROM.";
             }
         }
         catch (Exception ex)
@@ -1541,18 +1578,69 @@ public sealed class EmulatorService : IDisposable
     {
         if (string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase))
         {
-            // Disc images reference sibling files and are loaded by path;
-            // unpacking them into temp would break the cue/bin relationship.
-            if (selectedCore is { NeedFullpath: true })
-            {
-                throw new InvalidOperationException(
-                    "Disc images cannot be loaded from a ZIP. Use the cue/bin, chd, or pbp files directly.");
-            }
-
-            return ExtractRomFromZip(path);
+            return selectedCore is { NeedFullpath: true }
+                ? ExtractDiscZip(path)
+                : ExtractRomFromZip(path);
         }
 
         return path;
+    }
+
+    // Disc cores load by path and cue/bin sets need their siblings, so the
+    // whole archive is unpacked into a stable per-zip directory and the best
+    // matching entry (playlist first, then the largest image) is loaded.
+    private string ExtractDiscZip(string zipPath)
+    {
+        var extractDir = Path.Combine(pluginInterface.ConfigDirectory.FullName, "temp",
+            Path.GetFileNameWithoutExtension(zipPath));
+        Directory.CreateDirectory(extractDir);
+
+        using var archive = ZipFile.OpenRead(zipPath);
+        var extensions = selectedCore?.Extensions ?? [];
+
+        ZipArchiveEntry? best = null;
+        foreach (var e in archive.Entries)
+        {
+            var ext = Path.GetExtension(e.Name).ToLowerInvariant();
+            if (Array.IndexOf(extensions, ext) < 0)
+            {
+                continue;
+            }
+
+            if (ext is ".m3u" or ".cue")
+            {
+                best = e;
+                break;
+            }
+
+            if (best == null || e.Length > best.Length)
+            {
+                best = e;
+            }
+        }
+
+        if (best == null)
+        {
+            throw new InvalidOperationException(
+                $"No {selectedCore?.DisplayName ?? "compatible"} disc image found inside the archive.");
+        }
+
+        var target = Path.Combine(extractDir, best.Name);
+        if (!File.Exists(target) || new FileInfo(target).Length != best.Length)
+        {
+            status = $"Extracting {Path.GetFileName(zipPath)}...";
+            foreach (var e in archive.Entries)
+            {
+                if (e.Length == 0)
+                {
+                    continue;
+                }
+
+                e.ExtractToFile(Path.Combine(extractDir, e.Name), overwrite: true);
+            }
+        }
+
+        return target;
     }
 
     private string ExtractRomFromZip(string zipPath)
@@ -2905,5 +2993,7 @@ public sealed class EmulatorService : IDisposable
         texture = null;
         core?.Dispose();
         core = null;
+        hwRender?.Dispose();
+        hwRender = null;
     }
 }

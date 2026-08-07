@@ -25,6 +25,15 @@ This plugin ships libretro emulator cores: **bsnes** (SNES) as
   - Binary obtained from
     https://buildbot.libretro.com/nightly/windows/x86_64/latest/.
 
+- **LRPS2** — a PlayStation 2 emulator based on PCSX2
+  (`cores/pcsx2_libretro.dll`).
+  - Copyright (c) PCSX2 and libretro contributors.
+  - License: GNU General Public License v3.0 (GPLv3).
+  - Source code: https://github.com/libretro/ps2 at commit
+    `093f66ba2dca55e87e63dc6bdcb2d2fe3298b4b1`.
+  - The shipped Windows x64 binary is rebuilt locally with the corresponding
+    source patch in `native/lrps2/windows-large-iso.patch`.
+
 The GPLv3 license text is available at https://www.gnu.org/licenses/gpl-3.0.html
 and the MPL-2.0 license text at https://www.mozilla.org/MPL/2.0/. Under the
 GPLv3 you are entitled to the corresponding source code of the GPL-licensed

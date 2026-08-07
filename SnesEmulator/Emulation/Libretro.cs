@@ -18,17 +18,38 @@ public static class Libretro
     // Environment commands (retro_environment) - only the subset this frontend handles.
     public const uint EnvSetRotation = 1;
     public const uint EnvGetCanDupe = 3;
+    public const uint EnvSetInputDescriptors = 11;
     public const uint EnvSetMessage = 6;
     public const uint EnvShutdown = 7;
     public const uint EnvGetSystemDirectory = 9;
     public const uint EnvSetPixelFormat = 10;
-    public const uint EnvSetGeometry = 14;
+    public const uint EnvSetHwRender = 14;
     public const uint EnvGetVariable = 15;
     public const uint EnvSetVariables = 16;
     public const uint EnvGetVariableUpdate = 17;
     public const uint EnvSetSupportNoGame = 18;
     public const uint EnvGetLogInterface = 27;
     public const uint EnvGetSaveDirectory = 31;
+    public const uint EnvSetSystemAvInfo = 32;
+    public const uint EnvSetControllerInfo = 35;
+    public const uint EnvSetGeometry = 37;
+    public const uint EnvGetVfsInterface = 45 | EnvExperimental;
+    public const uint EnvGetCoreOptionsVersion = 52;
+    public const uint EnvSetCoreOptionsDisplay = 55;
+    public const uint EnvGetPreferredHwRender = 56;
+    public const uint EnvSetDiskControlExtInterface = 58;
+    public const uint EnvSetCoreOptionsUpdateDisplayCallback = 69;
+
+    // Experimental-flagged commands carry RETRO_ENVIRONMENT_EXPERIMENTAL in the high bits.
+    public const uint EnvExperimental = 0x10000;
+    public const uint EnvGetHwRenderInterface = 41 | EnvExperimental;
+
+    // Hardware context types (retro_hw_context_type) this frontend offers.
+    public const int HwContextD3D11 = 7;
+
+    // retro_hw_render_interface_d3d11 identity (libretro_d3d.h).
+    public const int HwRenderInterfaceD3D11 = 3;
+    public const uint HwRenderInterfaceD3D11Version = 1;
 
     // Input devices (retro_device).
     public const uint DeviceNone = 0;
@@ -155,6 +176,58 @@ public delegate void RetroLogPrintfDelegate(int level, IntPtr format, IntPtr vaL
 public struct RetroLogCallback
 {
     public RetroLogPrintfDelegate Log;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RetroCoreOptionsDisplay
+{
+    public IntPtr Key;
+    [MarshalAs(UnmanagedType.I1)] public bool Visible;
+}
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+[return: MarshalAs(UnmanagedType.I1)]
+public delegate bool RetroCoreOptionsUpdateDisplayDelegate();
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RetroCoreOptionsUpdateDisplayCallback
+{
+    public RetroCoreOptionsUpdateDisplayDelegate Callback;
+}
+
+// retro_hw_render_callback, filled by the core in SET_HW_RENDER. Only the
+// head of the struct is marshaled; the trailing fields are never read here.
+[StructLayout(LayoutKind.Sequential)]
+public struct RetroHwRenderCallback
+{
+    public int ContextType;
+    public IntPtr ContextReset;
+    public IntPtr GetCurrentFramebuffer;
+    public IntPtr GetProcAddress;
+    [MarshalAs(UnmanagedType.I1)] public bool Depth;
+    [MarshalAs(UnmanagedType.I1)] public bool Stencil;
+    [MarshalAs(UnmanagedType.I1)] public bool BottomLeftOrigin;
+    public uint VersionMajor;
+    public uint VersionMinor;
+    [MarshalAs(UnmanagedType.I1)] public bool CacheContext;
+    public IntPtr ContextDestroy;
+}
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void RetroHwContextResetDelegate();
+
+// retro_hw_render_interface_d3d11 (libretro_d3d.h), written by the frontend
+// in GET_HW_RENDER_INTERFACE.
+[StructLayout(LayoutKind.Sequential)]
+public struct RetroHwRenderInterfaceD3D11
+{
+    public int InterfaceType;
+    public uint InterfaceVersion;
+    public IntPtr Handle;
+    public IntPtr Device;
+    public IntPtr Context;
+    public int FeatureLevel;
+    public IntPtr D3DCompile;
 }
 
 // Functions the core exports and the frontend calls. Resolved at runtime via NativeLibrary because

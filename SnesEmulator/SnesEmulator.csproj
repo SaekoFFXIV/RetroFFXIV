@@ -17,6 +17,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="bsnes_libretro.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="resources\GameIndex.yaml" CopyToOutputDirectory="PreserveNewest" Link="resources\GameIndex.yaml" />
     <None Include="snes_h264.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="openh264-2.6.0-win64.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="snes_opus.dll" CopyToOutputDirectory="PreserveNewest" />
