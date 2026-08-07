@@ -25,6 +25,7 @@ public sealed class RomBrowser
     private string currentDir = string.Empty;
     private string error = string.Empty;
     private bool initialized;
+    private string lastExtensionKey = string.Empty;
 
     public RomBrowser(Configuration config, Action<string> onSelected, Func<string[]> getRomExtensions)
     {
@@ -36,6 +37,16 @@ public sealed class RomBrowser
     public void DrawContents()
     {
         EnsureInitialized();
+
+        // The file list is filtered by the selected core's extensions; refresh
+        // it when the core changes instead of showing the previous core's list.
+        var extensionKey = string.Join("|", getRomExtensions());
+        if (extensionKey != lastExtensionKey)
+        {
+            lastExtensionKey = extensionKey;
+            NavigateTo(currentDir);
+        }
+
         DrawDriveBar();
         DrawPathBar();
         DrawEntries();

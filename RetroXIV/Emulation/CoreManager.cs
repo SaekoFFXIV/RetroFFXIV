@@ -101,6 +101,12 @@ public sealed class CoreManager
     public CoreInfo? FindByPath(string path) =>
         Cores.FirstOrDefault(c => string.Equals(c.Path, path, StringComparison.OrdinalIgnoreCase));
 
+    // Plugin updates move the install directory (…/RetroXIV/<version>/), which
+    // invalidates a saved absolute core path; match by file name instead.
+    public CoreInfo? FindByFileName(string fileName) =>
+        Cores.FirstOrDefault(c => string.Equals(
+            System.IO.Path.GetFileName(c.Path), fileName, StringComparison.OrdinalIgnoreCase));
+
     public CoreInfo? FindByName(string name) =>
         Cores.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
 

@@ -193,9 +193,12 @@ public sealed class EmulatorService : IDisposable
             (msg, args) => log.Information(msg, args),
             (msg, args) => log.Error(msg, args));
 
-        // Restore the previously selected core, or pick the default.
+        // Restore the previously selected core, or pick the default. A plugin
+        // update changes the install directory, so a stale absolute path falls
+        // back to matching the core by file name rather than losing the choice.
         selectedCore = !string.IsNullOrEmpty(config.SelectedCorePath)
             ? coreManager.FindByPath(config.SelectedCorePath)
+              ?? coreManager.FindByFileName(Path.GetFileName(config.SelectedCorePath))
             : null;
         selectedCore ??= coreManager.GetDefault();
 
@@ -1926,6 +1929,10 @@ public sealed class EmulatorService : IDisposable
         ImGui.Separator();
         ImGui.Spacing();
         DrawShareablePlayerId();
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+        DrawIdentitySection();
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
