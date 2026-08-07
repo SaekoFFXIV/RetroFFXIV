@@ -1239,7 +1239,8 @@ public sealed class EmulatorService : IDisposable
         if (gp.Connected)
         {
             DrawInsetText($"Controller: {gp.ActiveBackend} "
-                          + $"(stick {gp.LeftStickX:F2}, {gp.LeftStickY:F2})");
+                          + $"(L {gp.LeftStickX:F2}, {gp.LeftStickY:F2} | "
+                          + $"R {gp.RightStickX:F2}, {gp.RightStickY:F2})");
         }
         else
         {
@@ -1272,6 +1273,8 @@ public sealed class EmulatorService : IDisposable
 
         if (selectedCore is { IsPs1: true } or { IsPs2: true })
         {
+            var (slx, sly, srx, sry) = inputManager.GetAnalogSnapshot();
+            DrawInsetText($"Analog to core: L {slx}, {sly} | R {srx}, {sry}");
             DrawInsetTextDisabled("Analog core: stick keys are bindable in the Analog sticks "
                 + "section below; controller sticks and triggers map automatically.");
         }

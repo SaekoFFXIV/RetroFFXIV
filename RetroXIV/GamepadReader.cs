@@ -169,6 +169,8 @@ public sealed class GamepadReader : IDisposable
     private const ushort UsageX = 0x30;
     private const ushort UsageY = 0x31;
     private const ushort UsageZ = 0x32;  // often right stick X
+    private const ushort UsageRx = 0x33; // right stick X on pads that skip Z
+    private const ushort UsageRy = 0x34; // right stick Y on pads that skip Rz
     private const ushort UsageRz = 0x35; // often right stick Y
     private const ushort UsageHat = 0x39;
     // HID Usage Page 9 (Button) — buttons are usage 1, 2, 3, ...
@@ -183,7 +185,7 @@ public sealed class GamepadReader : IDisposable
     private volatile string dbgBtns = "";
 
     // Discovered axis info for normalization.
-    private int xMin, xMax, yMin, yMax, zMin, zMax, rzMin, rzMax;
+    private int xMin, xMax, yMin, yMax, zMin, zMax, rxMin, rxMax, ryMin, ryMax, rzMin, rzMax;
 
     private void HidLoop()
     {
@@ -218,7 +220,7 @@ public sealed class GamepadReader : IDisposable
                 hidRX = rx;
                 hidRY = ry;
                 hidOk = true;
-                hidDbg = $"HID 0x{btns:X4} s={sx:F2},{sy:F2} rawX={dbgRawX} rawY={dbgRawY} hat={dbgHat} btns=[{dbgBtns}] range={xMin}/{xMax},{yMin}/{yMax}";
+                hidDbg = $"HID 0x{btns:X4} s={sx:F2},{sy:F2} r={rx:F2},{ry:F2} rawX={dbgRawX} rawY={dbgRawY} hat={dbgHat} btns=[{dbgBtns}] range={xMin}/{xMax},{yMin}/{yMax}";
             }
 
             HidD_FreePreparsedData(ppd);
@@ -280,6 +282,7 @@ public sealed class GamepadReader : IDisposable
     {
         xMin = -128; xMax = 127; yMin = -128; yMax = 127; // defaults
         zMin = -128; zMax = 127; rzMin = -128; rzMax = 127;
+        rxMin = -128; rxMax = 127; ryMin = -128; ryMax = 127;
 
         var count = (uint)32;
         var caps = new HidpValueCaps[count];
@@ -302,6 +305,16 @@ public sealed class GamepadReader : IDisposable
             {
                 zMin = caps[i].LogicalMin;
                 zMax = caps[i].LogicalMax;
+            }
+            if (caps[i].UsageMin == UsageRx || caps[i].UsageMax == UsageRx)
+            {
+                rxMin = caps[i].LogicalMin;
+                rxMax = caps[i].LogicalMax;
+            }
+            if (caps[i].UsageMin == UsageRy || caps[i].UsageMax == UsageRy)
+            {
+                ryMin = caps[i].LogicalMin;
+                ryMax = caps[i].LogicalMax;
             }
             if (caps[i].UsageMin == UsageRz || caps[i].UsageMax == UsageRz)
             {
@@ -330,16 +343,27 @@ public sealed class GamepadReader : IDisposable
             sy = range > 0 ? -((rawY - yMin) / (float)range * 2f - 1f) : 0; // invert Y
         }
 
-        // Right stick (Z / Rz on most generic pads).
+        // Right stick (Z / Rz on most generic pads; Rx / Ry on pads whose
+        // descriptors skip Z — the fallback only runs when Z/Rz is absent).
         if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageZ, out var rawZ, ppd, report, len) == HIDP_STATUS_SUCCESS)
         {
             var range = zMax - zMin;
             rx = range > 0 ? (rawZ - zMin) / (float)range * 2f - 1f : 0;
         }
+        else if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageRx, out var rawRx, ppd, report, len) == HIDP_STATUS_SUCCESS)
+        {
+            var range = rxMax - rxMin;
+            rx = range > 0 ? (rawRx - rxMin) / (float)range * 2f - 1f : 0;
+        }
         if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageRz, out var rawRz, ppd, report, len) == HIDP_STATUS_SUCCESS)
         {
             var range = rzMax - rzMin;
             ry = range > 0 ? -((rawRz - rzMin) / (float)range * 2f - 1f) : 0; // invert Y
+        }
+        else if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageRy, out var rawRy, ppd, report, len) == HIDP_STATUS_SUCCESS)
+        {
+            var range = ryMax - ryMin;
+            ry = range > 0 ? -((rawRy - ryMin) / (float)range * 2f - 1f) : 0; // invert Y
         }
 
         // Read hat switch.

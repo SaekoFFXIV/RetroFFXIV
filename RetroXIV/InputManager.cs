@@ -56,6 +56,16 @@ public sealed class InputManager
         }
     }
 
+    // Diagnostics: the analog values the core's RETRO_DEVICE_ANALOG queries
+    // would currently receive (retro units, -32768..32767).
+    public (short LX, short LY, short RX, short RY) GetAnalogSnapshot()
+    {
+        lock (stateLock)
+        {
+            return (analogLeftX, analogLeftY, analogRightX, analogRightY);
+        }
+    }
+
     // Exposed so the UI can read/poll the gamepad for controller rebinding.
     public GamepadReader Gamepad => gamepadReader;
 
