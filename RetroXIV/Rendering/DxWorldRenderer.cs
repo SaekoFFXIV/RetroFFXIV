@@ -13,7 +13,7 @@ using Vortice.D3DCompiler;
 using Vortice.DXGI;
 using VorticeMath = Vortice.Mathematics;
 
-namespace SnesEmulator.Rendering;
+namespace RetroXIV.Rendering;
 
 // Depth-integrated world screen: draws the video quads inside the game's
 // DX11 frame with a read-only depth test against the scene depth buffer, so

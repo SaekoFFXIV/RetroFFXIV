@@ -75,5 +75,5 @@ The `snes_h264.dll` wrapper is a thin C++ shim around OpenH264, built from
 thin C shim around libopus, built from `native/snes_opus.cpp` in this
 repository.
 
-The SnesEmulator plugin itself is licensed under the GNU Affero General Public
+The RetroXIV plugin itself is licensed under the GNU Affero General Public
 License v3.0 (AGPL-3.0-or-later), which is compatible with the GPLv3.

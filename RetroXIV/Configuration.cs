@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using EmulatorStream;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 public enum SnesButton
 {

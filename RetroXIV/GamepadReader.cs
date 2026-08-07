@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // Reads gamepad input via three backends:
 //   1. XInput — Xbox / XInput-mode controllers.

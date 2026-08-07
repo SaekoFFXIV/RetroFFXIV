@@ -266,7 +266,7 @@ public sealed class StreamPanel : IDisposable
         try
         {
             var spec = RawImageSpecification.Rgba32(w, h);
-            var newTex = textureProvider.CreateFromRaw(spec, rgba, $"SnesEmulator.StreamViewer.{w}x{h}");
+            var newTex = textureProvider.CreateFromRaw(spec, rgba, $"RetroXIV.StreamViewer.{w}x{h}");
             viewer.Texture?.Dispose();
             viewer.Texture = newTex;
         }

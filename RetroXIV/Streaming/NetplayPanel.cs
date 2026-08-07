@@ -2,9 +2,9 @@ using Dalamud.Bindings.ImGui;
 using System;
 using System.Numerics;
 using System.Threading.Tasks;
-using SnesEmulator.Emulation;
+using RetroXIV.Emulation;
 
-namespace SnesEmulator.Streaming;
+namespace RetroXIV.Streaming;
 
 // ImGui UI for the "Netplay" tab: host or join a lockstep netplay session.
 internal sealed class NetplayPanel : IDisposable

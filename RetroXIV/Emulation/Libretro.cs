@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace SnesEmulator.Emulation;
+namespace RetroXIV.Emulation;
 
 // P/Invoke surface for the libretro API (libretro.h). A libretro "core" (here, bsnes) is a native
 // DLL exposing a fixed set of C functions; the frontend (this plugin) loads it, hands it callbacks,

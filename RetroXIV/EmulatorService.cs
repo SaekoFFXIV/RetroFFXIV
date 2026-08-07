@@ -12,13 +12,13 @@ using System.IO.Compression;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using SnesEmulator.Emulation;
-using SnesEmulator.Rendering;
-using SnesEmulator.Streaming;
+using RetroXIV.Emulation;
+using RetroXIV.Rendering;
+using RetroXIV.Streaming;
 using EmulatorStream;
 using FfxivCameraManager = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.CameraManager;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // Owns the emulation core and its presentation: a single window styled as one piano-black retro TV
 // unit - a CRT screen with a control strip, plus a recessed control deck (ROM / Keyboard /
@@ -1363,7 +1363,7 @@ public sealed class EmulatorService : IDisposable
         try
         {
             var spec = RawImageSpecification.Rgba32(width, height);
-            var newTexture = textureProvider.CreateFromRaw(spec, rgba, "SnesEmulator.Frame");
+            var newTexture = textureProvider.CreateFromRaw(spec, rgba, "RetroXIV.Frame");
             texture?.Dispose();
             texture = newTexture;
             textureWidth = width;

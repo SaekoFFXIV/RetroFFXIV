@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using EmulatorStream;
 
-namespace SnesEmulator.Emulation;
+namespace RetroXIV.Emulation;
 
 // Managed frontend for a libretro core. Loads the native core DLL, wires up the callbacks the core
 // expects, and runs the emulation on its own thread paced to the core's native FPS - keeping it off
@@ -425,7 +425,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         }
 
         running = true;
-        thread = new Thread(RunLoop) { IsBackground = true, Name = "SnesEmulator.Core" };
+        thread = new Thread(RunLoop) { IsBackground = true, Name = "RetroXIV.Core" };
         thread.Start();
     }
 

@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using EmulatorStream;
 
-namespace SnesEmulator.Streaming;
+namespace RetroXIV.Streaming;
 
 // Lockstep netplay session.  Both players run the same deterministic core
 // (bsnes) and exchange inputs through the relay every frame.  Neither

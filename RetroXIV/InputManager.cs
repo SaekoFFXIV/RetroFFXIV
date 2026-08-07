@@ -2,9 +2,9 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin.Services;
 using System;
 using System.Runtime.InteropServices;
-using SnesEmulator.Emulation;
+using RetroXIV.Emulation;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // Maps keyboard and gamepad input to SNES buttons and handles input capture. Input is split into two
 // paths that run on different threads:

@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 
-namespace SnesEmulator.Emulation;
+namespace RetroXIV.Emulation;
 
 public sealed record CoreInfo(string Path, string Name, string Version, string[] Extensions, bool NeedFullpath)
 {

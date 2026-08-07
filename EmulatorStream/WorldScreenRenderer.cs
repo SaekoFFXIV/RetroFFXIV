@@ -101,7 +101,7 @@ public sealed class WorldScreenRenderer
             try
             {
                 var spec = RawImageSpecification.Rgba32(pendingW, pendingH);
-                var tex = textureProvider.CreateFromRaw(spec, pendingFrame, "SnesEmulator.WorldScreen");
+                var tex = textureProvider.CreateFromRaw(spec, pendingFrame, "RetroXIV.WorldScreen");
                 screenTexture?.Dispose();
                 screenTexture = tex;
             }

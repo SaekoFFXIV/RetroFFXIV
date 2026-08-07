@@ -2,8 +2,8 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <Version>0.2.2.0</Version>
-    <AssemblyName>SnesEmulator</AssemblyName>
-    <RootNamespace>SnesEmulator</RootNamespace>
+    <AssemblyName>RetroXIV</AssemblyName>
+    <RootNamespace>RetroXIV</RootNamespace>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

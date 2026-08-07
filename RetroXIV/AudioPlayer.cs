@@ -1,9 +1,9 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System;
-using SnesEmulator.Emulation;
+using RetroXIV.Emulation;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // Plays the core's decoded audio through WASAPI. Volume is applied as a gain on the samples in the
 // wave provider (reliable) rather than via the WASAPI session volume, which did not take effect.

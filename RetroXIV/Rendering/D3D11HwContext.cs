@@ -1,12 +1,12 @@
 using System;
 using System.Runtime.InteropServices;
-using SnesEmulator.Emulation;
+using RetroXIV.Emulation;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
 
-namespace SnesEmulator.Rendering;
+namespace RetroXIV.Rendering;
 
 // Offscreen D3D11 presentation context for hardware-rendering libretro cores
 // (LRPS2). The core renders with this device on its own thread during

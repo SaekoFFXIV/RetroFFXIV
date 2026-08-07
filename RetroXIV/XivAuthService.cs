@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // XIVAuth OAuth2 device-code flow for FFXIV character identity.
 // The plugin requests a device code, the user authorizes in a browser,

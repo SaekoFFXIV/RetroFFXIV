@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Plugin.Services;
 
-namespace SnesEmulator.Rendering;
+namespace RetroXIV.Rendering;
 
 // Reconstructs the game's view-projection matrix from IGameGui.WorldToScreen
 // projections via a direct-linear-transform least squares solve.  No game

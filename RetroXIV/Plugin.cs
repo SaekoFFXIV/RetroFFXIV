@@ -10,7 +10,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 public sealed class Plugin : IDalamudPlugin
 {
@@ -43,6 +43,8 @@ public sealed class Plugin : IDalamudPlugin
         if (!string.IsNullOrEmpty(pluginDir))
             SetDllDirectory(pluginDir);
 
+        MigrateLegacyConfig();
+
         Configuration = (PluginInterface.GetPluginConfig() as Configuration) ?? new Configuration();
 
         var input = new InputManager(Configuration, KeyState);
@@ -57,6 +59,42 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += Draw;
         PluginInterface.UiBuilder.OpenMainUi += OpenWindow;
         PluginInterface.UiBuilder.OpenConfigUi += OpenWindow;
+    }
+
+    // The plugin was renamed from SnesEmulator; carry the old config directory
+    // (settings, saves, BIOS layout) over on first launch under the new name.
+    private static void MigrateLegacyConfig()
+    {
+        try
+        {
+            var newDir = PluginInterface.ConfigDirectory;
+            var oldDir = Path.Combine(newDir.Parent!.FullName, "SnesEmulator");
+            if (!Directory.Exists(oldDir) || newDir.GetFiles().Length > 0)
+            {
+                return;
+            }
+
+            foreach (var file in Directory.GetFiles(oldDir, "*", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(oldDir, file);
+                var destination = Path.Combine(newDir.FullName, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination, overwrite: false);
+            }
+
+            var oldConfig = Path.Combine(newDir.FullName, "SnesEmulator.json");
+            var newConfig = Path.Combine(newDir.FullName, "RetroXIV.json");
+            if (File.Exists(oldConfig) && !File.Exists(newConfig))
+            {
+                File.Move(oldConfig, newConfig);
+            }
+
+            Log.Information("Migrated legacy SnesEmulator config to {Dir}", newDir.FullName);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Legacy config migration failed");
+        }
     }
 
     public void Dispose()

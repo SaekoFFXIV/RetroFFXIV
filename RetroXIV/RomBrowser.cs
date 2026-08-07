@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 
-namespace SnesEmulator;
+namespace RetroXIV;
 
 // An embeddable file browser for picking a ROM. Drawn inline inside the control window's ROM
 // tab (not as a separate popup): shows drives, folders, and selectable files; clicking a file

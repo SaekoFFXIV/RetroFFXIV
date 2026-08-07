@@ -1,6 +1,6 @@
 using System;
 
-namespace SnesEmulator.Emulation;
+namespace RetroXIV.Emulation;
 
 // A hardware presentation context handed to cores that cannot present through
 // retro_video_refresh (LRPS2 renders on the GPU and displays into whatever
