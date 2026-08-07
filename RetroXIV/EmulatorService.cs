@@ -1689,11 +1689,14 @@ public sealed class EmulatorService : IDisposable
             var resolvedPath = ResolveRomPath(romPath);
             if (core.LoadGame(resolvedPath))
             {
-                // Plug in the right controller type before the first playable
-                // frames: the DualShock subclass on PS1, plain analog on PS2,
-                // the RetroPad everywhere else.
-                core.SetControllerPortDevice(0, selectedCore?.PortDevice ?? Libretro.DeviceJoypad);
-                core.SetControllerPortDevice(1, selectedCore?.PortDevice ?? Libretro.DeviceJoypad);
+                // Beetle PSX needs its DualShock subclass plugged in before
+                // the first playable frames; other cores either poll what
+                // they need (LRPS2) or default to the RetroPad.
+                if (selectedCore?.PortDevice is { } portDevice)
+                {
+                    core.SetControllerPortDevice(0, portDevice);
+                    core.SetControllerPortDevice(1, portDevice);
+                }
 
                 screenOn = true;
                 crtAnimTarget = 1f;
