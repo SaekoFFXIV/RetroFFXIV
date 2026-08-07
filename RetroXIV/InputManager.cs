@@ -99,12 +99,13 @@ public sealed class InputManager
         // RetroPad above stays answered either way.
         var kbUse = config.InputMode != InputMode.Controller;
         var gpUse = config.InputMode != InputMode.Keyboard;
+        var (kbLX, kbLY, kbRX, kbRY) = kbUse ? ReadKeyboardSticks() : (0f, 0f, 0f, 0f);
         var (lx, ly) = BlendAnalog(
-            kbUse ? ReadKeyboardStick() : (0f, 0f),
+            (kbLX, kbLY),
             gpUse ? ApplyDeadzone(gamepadReader.LeftStickX, -gamepadReader.LeftStickY) : (0f, 0f));
-        var (rx, ry) = gpUse
-            ? ApplyDeadzone(gamepadReader.RightStickX, -gamepadReader.RightStickY)
-            : (0f, 0f);
+        var (rx, ry) = BlendAnalog(
+            (kbRX, kbRY),
+            gpUse ? ApplyDeadzone(gamepadReader.RightStickX, -gamepadReader.RightStickY) : (0f, 0f));
 
         var l2 = gpUse ? gamepadReader.LeftTriggerValue : 0f;
         var r2 = gpUse ? gamepadReader.RightTriggerValue : 0f;
@@ -139,7 +140,7 @@ public sealed class InputManager
 
         foreach (var (name, vk) in config.KeyBindings)
         {
-            if (keyState.IsVirtualKeyValid(vk))
+            if (vk != 0 && keyState.IsVirtualKeyValid(vk))
             {
                 keyState[vk] = false;
             }
@@ -151,13 +152,30 @@ public sealed class InputManager
     // the other port reads the remote player's networked input.
     public short GetInputState(uint port, uint device, uint index, uint id)
     {
-        if (device == Libretro.DeviceJoypad && id <= 15)
+        if (device == Libretro.DeviceJoypad)
         {
-            lock (stateLock)
+            // RetroArch extension used by LRPS2: id 256 returns all 16 RetroPad
+            // bits in one mask query — answering 0 here leaves the whole PS2
+            // pad empty (per-button queries alone never arrive).
+            if (id == Libretro.JoypadMask)
             {
-                var state = port == (uint)LocalPort ? joypad : remoteJoypad;
-                return (short)((state >> (int)id) & 1);
+                lock (stateLock)
+                {
+                    var state = port == (uint)LocalPort ? joypad : remoteJoypad;
+                    return (short)state;
+                }
             }
+
+            if (id <= 15)
+            {
+                lock (stateLock)
+                {
+                    var state = port == (uint)LocalPort ? joypad : remoteJoypad;
+                    return (short)((state >> (int)id) & 1);
+                }
+            }
+
+            return 0;
         }
 
         if (device == Libretro.DeviceAnalog)
@@ -185,11 +203,13 @@ public sealed class InputManager
                         Libretro.AnalogIdY => analogRightY,
                         _ => (short)0,
                     },
-                    // Trigger pressure (L2 on X, R2 on Y).
+                    // Trigger pressure, keyed by the joypad id of the button
+                    // (how LRPS2 asks). Non-trigger buttons fall back to the
+                    // digital mask inside the core.
                     Libretro.AnalogIndexButton => id switch
                     {
-                        Libretro.AnalogIdX => analogL2,
-                        Libretro.AnalogIdY => analogR2,
+                        Libretro.JoypadL2 => analogL2,
+                        Libretro.JoypadR2 => analogR2,
                         _ => (short)0,
                     },
                     _ => 0,
@@ -254,25 +274,38 @@ public sealed class InputManager
         return state;
     }
 
-    // The four direction keys drive the left analog stick at full deflection
-    // (screen coordinates: +Y down, diagonals normalized) — the standard
-    // keyboard-analog mapping.
-    private (float X, float Y) ReadKeyboardStick()
+    // The keys bound to each stick direction drive that stick at full
+    // deflection (screen coordinates: +Y down, diagonals normalized) — the
+    // standard keyboard-analog mapping.
+    private (float LX, float LY, float RX, float RY) ReadKeyboardSticks()
     {
-        var x = 0f;
-        var y = 0f;
-        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Left), out var left) && KeyDown(left)) x -= 1f;
-        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Right), out var right) && KeyDown(right)) x += 1f;
-        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Up), out var up) && KeyDown(up)) y -= 1f;
-        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Down), out var down) && KeyDown(down)) y += 1f;
+        var lx = 0f;
+        var ly = 0f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.LeftStickLeft), out var left) && KeyDown(left)) lx -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.LeftStickRight), out var right) && KeyDown(right)) lx += 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.LeftStickUp), out var up) && KeyDown(up)) ly -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.LeftStickDown), out var down) && KeyDown(down)) ly += 1f;
 
-        if (x != 0f && y != 0f)
+        var rx = 0f;
+        var ry = 0f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.RightStickLeft), out var rleft) && KeyDown(rleft)) rx -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.RightStickRight), out var rright) && KeyDown(rright)) rx += 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.RightStickUp), out var rup) && KeyDown(rup)) ry -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.RightStickDown), out var rdown) && KeyDown(rdown)) ry += 1f;
+
+        if (lx != 0f && ly != 0f)
         {
-            x *= 0.70710678f;
-            y *= 0.70710678f;
+            lx *= 0.70710678f;
+            ly *= 0.70710678f;
         }
 
-        return (x, y);
+        if (rx != 0f && ry != 0f)
+        {
+            rx *= 0.70710678f;
+            ry *= 0.70710678f;
+        }
+
+        return (lx, ly, rx, ry);
     }
 
     private const float AnalogDeadzone = 0.15f;
@@ -328,6 +361,9 @@ public sealed class InputManager
         SnesButton.R => Bit(Libretro.JoypadR),
         SnesButton.L2 => Bit(Libretro.JoypadL2),
         SnesButton.R2 => Bit(Libretro.JoypadR2),
+        SnesButton.L3 => Bit(Libretro.JoypadL3),
+        SnesButton.R3 => Bit(Libretro.JoypadR3),
+        // Stick directions carry no RetroPad bit; they feed the analog path.
         _ => 0,
     };
 }

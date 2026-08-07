@@ -19,8 +19,22 @@ public enum SnesButton
     // never asks for them.
     L2,
     R2,
+    // Stick clicks (ids 14/15) — PS2-era buttons. Default unbound so they
+    // cannot collide with custom Start/Select mappings on the same keys.
+    L3,
+    R3,
     Start,
     Select,
+    // Keyboard-only analog targets for PS1/PS2: which keys drive the sticks.
+    // They carry no RetroPad bit of their own.
+    LeftStickUp,
+    LeftStickDown,
+    LeftStickLeft,
+    LeftStickRight,
+    RightStickUp,
+    RightStickDown,
+    RightStickLeft,
+    RightStickRight,
 }
 
 public enum InputMode
@@ -123,8 +137,20 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         [nameof(SnesButton.R)] = 0x45,      // E
         [nameof(SnesButton.L2)] = 0x31,     // 1
         [nameof(SnesButton.R2)] = 0x32,     // 2
+        [nameof(SnesButton.L3)] = 0,        // unbound by default
+        [nameof(SnesButton.R3)] = 0,        // unbound by default
         [nameof(SnesButton.Start)] = 0x0D,  // Enter
         [nameof(SnesButton.Select)] = 0x10, // Shift
+        // Analog sticks (PS1/PS2): arrows mirror the D-pad by default,
+        // IJKL drives the right stick.
+        [nameof(SnesButton.LeftStickUp)] = 0x26,     // Arrow Up
+        [nameof(SnesButton.LeftStickDown)] = 0x28,   // Arrow Down
+        [nameof(SnesButton.LeftStickLeft)] = 0x25,   // Arrow Left
+        [nameof(SnesButton.LeftStickRight)] = 0x27,  // Arrow Right
+        [nameof(SnesButton.RightStickUp)] = 0x49,    // I
+        [nameof(SnesButton.RightStickDown)] = 0x4B,  // K
+        [nameof(SnesButton.RightStickLeft)] = 0x4A,  // J
+        [nameof(SnesButton.RightStickRight)] = 0x4C, // L
     };
 
     // Default controller mapping (XInput button flags), matched by physical position: SNES A/B/X/Y
@@ -139,6 +165,8 @@ public sealed class Configuration : Dalamud.Configuration.IPluginConfiguration
         [nameof(SnesButton.R)] = 0x0200,      // RB
         [nameof(SnesButton.L2)] = 0x0400,     // LT (analog trigger, thresholded)
         [nameof(SnesButton.R2)] = 0x0800,     // RT (analog trigger, thresholded)
+        [nameof(SnesButton.L3)] = 0,          // unbound: many players map Start/Select
+        [nameof(SnesButton.R3)] = 0,          // to the stick clicks instead
         [nameof(SnesButton.Start)] = 0x0010,  // Start
         [nameof(SnesButton.Select)] = 0x0020, // Back
     };

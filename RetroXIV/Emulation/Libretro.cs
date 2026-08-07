@@ -82,6 +82,10 @@ public static class Libretro
     public const uint JoypadR2 = 13;
     public const uint JoypadL3 = 14;
     public const uint JoypadR3 = 15;
+    // RetroArch extension (not in vanilla libretro.h): a single query whose
+    // id is 256 returns ALL 16 joypad bits as one mask. LRPS2 reads its whole
+    // pad this way and ignores per-button JOYPAD queries.
+    public const uint JoypadMask = 256;
 
     // Analog stick indices.
     public const uint AnalogIndexLeft = 0;

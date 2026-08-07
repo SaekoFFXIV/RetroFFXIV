@@ -68,6 +68,7 @@ public sealed class EmulatorService : IDisposable
         SnesButton.Up, SnesButton.Down, SnesButton.Left, SnesButton.Right,
         SnesButton.A, SnesButton.B, SnesButton.X, SnesButton.Y,
         SnesButton.L, SnesButton.R, SnesButton.L2, SnesButton.R2,
+        SnesButton.L3, SnesButton.R3,
         SnesButton.Start, SnesButton.Select,
     };
 
@@ -75,7 +76,21 @@ public sealed class EmulatorService : IDisposable
     {
         SnesButton.A, SnesButton.B, SnesButton.X, SnesButton.Y,
         SnesButton.L, SnesButton.R, SnesButton.L2, SnesButton.R2,
+        SnesButton.L3, SnesButton.R3,
         SnesButton.Start, SnesButton.Select,
+    };
+
+    // Keyboard keys that drive the analog sticks on PS1/PS2.
+    private static readonly SnesButton[] LeftStickOrder =
+    {
+        SnesButton.LeftStickUp, SnesButton.LeftStickDown,
+        SnesButton.LeftStickLeft, SnesButton.LeftStickRight,
+    };
+
+    private static readonly SnesButton[] RightStickOrder =
+    {
+        SnesButton.RightStickUp, SnesButton.RightStickDown,
+        SnesButton.RightStickLeft, SnesButton.RightStickRight,
     };
 
     private static readonly string[] DeckTabLabels = { "ROM", "Controls", "Settings", "Sync", "Friends" };
@@ -202,6 +217,21 @@ public sealed class EmulatorService : IDisposable
         this.objectTable = objectTable;
 
         syncFriends = new List<SyncFriend>(config.SyncFriends);
+
+        // Upgraded configs predate newer binding targets (stick keys, L3/R3);
+        // backfill anything missing with defaults without touching binds the
+        // player already made.
+        foreach (var (name, vk) in Configuration.DefaultKeyBindings())
+        {
+            if (!config.KeyBindings.ContainsKey(name))
+                config.KeyBindings[name] = vk;
+        }
+
+        foreach (var (name, flag) in Configuration.DefaultControllerBindings())
+        {
+            if (!config.ControllerBindings.ContainsKey(name))
+                config.ControllerBindings[name] = flag;
+        }
 
         var pluginDir = pluginInterface.AssemblyLocation.DirectoryName ?? string.Empty;
         coreManager = new CoreManager(
@@ -740,13 +770,18 @@ public sealed class EmulatorService : IDisposable
                 DrawInsetTextColored(new Vector4(0.36f, 0.78f, 0.92f, 1f), "Input bindings");
                 DrawInsetTextDisabled("Select a field to rebind. Right-click restores its default.");
                 ImGui.Spacing();
-                DrawSectionHeading("Keyboard", "12 inputs");
+                DrawSectionHeading("Keyboard", $"{ButtonOrder.Length} inputs");
                 DrawKeyboardTab();
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Spacing();
-                DrawSectionHeading("Controller", "8 inputs");
+                DrawSectionHeading("Controller", $"{ControllerButtonOrder.Length} inputs");
                 DrawControllerTab();
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
+                DrawSectionHeading("Analog sticks", "PS1 / PS2");
+                DrawAnalogTab();
                 EndTabContent();
                 break;
 
@@ -1237,8 +1272,8 @@ public sealed class EmulatorService : IDisposable
 
         if (selectedCore is { IsPs1: true } or { IsPs2: true })
         {
-            DrawInsetTextDisabled("Analog: sticks and triggers map automatically on this core; "
-                + "direction keys also drive the left stick.");
+            DrawInsetTextDisabled("Analog core: stick keys are bindable in the Analog sticks "
+                + "section below; controller sticks and triggers map automatically.");
         }
     }
 
@@ -1309,6 +1344,66 @@ public sealed class EmulatorService : IDisposable
                 rebindingController = null;
                 SaveConfig();
             }
+        }
+    }
+
+    private static readonly System.Collections.Generic.Dictionary<SnesButton, string> StickDirectionNames = new()
+    {
+        [SnesButton.LeftStickUp] = "Up",
+        [SnesButton.LeftStickDown] = "Down",
+        [SnesButton.LeftStickLeft] = "Left",
+        [SnesButton.LeftStickRight] = "Right",
+        [SnesButton.RightStickUp] = "Up",
+        [SnesButton.RightStickDown] = "Down",
+        [SnesButton.RightStickLeft] = "Left",
+        [SnesButton.RightStickRight] = "Right",
+    };
+
+    // Keyboard bindings for the analog sticks (PS1/PS2). Controller sticks
+    // and triggers are physical and map automatically, so they are not
+    // rebindable here. Reuses the keyboard rebind flow.
+    private void DrawAnalogTab()
+    {
+        DrawInsetTextDisabled("These keys drive the sticks on analog games. A controller's "
+            + "physical sticks and LT/RT always map to the sticks and L2/R2 pressure.");
+        ImGui.Spacing();
+        DrawBindingColumnHeader();
+
+        DrawInsetText("Left stick");
+        foreach (var button in LeftStickOrder)
+            DrawAnalogBindRow(button);
+
+        ImGui.Spacing();
+        DrawInsetText("Right stick");
+        foreach (var button in RightStickOrder)
+            DrawAnalogBindRow(button);
+    }
+
+    private void DrawAnalogBindRow(SnesButton button)
+    {
+        var name = button.ToString();
+        config.KeyBindings.TryGetValue(name, out var vk);
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted(StickDirectionNames[button]);
+        ImGui.SameLine(BindingColumnX);
+
+        var label = rebindingKey == button ? "Press a key..." : KeyName(vk);
+        if (ImGui.Button($"{label}##kb{name}", new Vector2(-1, 0)))
+        {
+            rebindingKey = button;
+        }
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+        {
+            var defaults = Configuration.DefaultKeyBindings();
+            if (defaults.TryGetValue(name, out var dvk))
+            {
+                config.KeyBindings[name] = dvk;
+            }
+
+            rebindingKey = null;
+            SaveConfig();
         }
     }
 
