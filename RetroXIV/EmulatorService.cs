@@ -28,6 +28,10 @@ namespace RetroXIV;
 public sealed class EmulatorService : IDisposable
 {
     private const int MaxScale = 5;
+
+    // PS2 cores cap at a lower display scale; higher options stay visible but disabled.
+    private const int Ps2MaxScale = 2;
+
     private const float Bezel = 26f;
     private const float ControlStrip = 48f;
     private const float PanelGap = 10f;
@@ -97,6 +101,10 @@ public sealed class EmulatorService : IDisposable
     private readonly IObjectTable objectTable;
     private readonly CoreManager coreManager;
     private CoreInfo? selectedCore;
+
+    // The effective scale cap for the current core. The saved config value is left untouched,
+    // so switching back to a non-PS2 core restores the player's preferred scale.
+    private int CurrentMaxScale => selectedCore is { IsPs2: true } ? Ps2MaxScale : MaxScale;
     private readonly XivAuthService xivAuth;
     private readonly StreamConfig streamConfig;
     private StreamPanel? streamPanel;
@@ -206,7 +214,8 @@ public sealed class EmulatorService : IDisposable
             msg => log.Information("[Stream] {Msg}", msg),
             () => core);
         streamPanel.SetVolume(config.Volume);
-        presence = new RelayPresence(msg => log.Information("[Presence] {Msg}", msg));
+        presence = new RelayPresence(msg => log.Information("[Presence] {Msg}", msg),
+            RegisterPlayerIdAsync);
         dxScreen = new Rendering.DxWorldRenderer(interop, log);
         netplayPanel = new NetplayPanel(
             config,
@@ -380,7 +389,7 @@ public sealed class EmulatorService : IDisposable
             core.Paused = !screenOn;
         }
 
-        var scale = Math.Max(1, config.ResolutionScale);
+        var scale = Math.Clamp(config.ResolutionScale, 1, CurrentMaxScale);
         var baseW = core is { IsGameLoaded: true } ? core.BaseWidth : 256;
         var baseH = core is { IsGameLoaded: true } ? core.BaseHeight : 224;
         var screenW = baseW * scale;
@@ -1185,14 +1194,17 @@ public sealed class EmulatorService : IDisposable
         DrawInsetTextDisabled("Applies to emulator and remote stream audio.");
 
         const string resolutionLabel = "Resolution scale";
+        var maxScale = CurrentMaxScale;
         var resolutionWidth = Math.Max(140f,
             ImGui.GetContentRegionAvail().X - ImGui.CalcTextSize(resolutionLabel).X - 12f);
         ImGui.SetNextItemWidth(resolutionWidth);
-        if (ImGui.BeginCombo(resolutionLabel, $"{config.ResolutionScale}x"))
+        if (ImGui.BeginCombo(resolutionLabel, $"{Math.Clamp(config.ResolutionScale, 1, maxScale)}x"))
         {
             for (var i = 1; i <= MaxScale; i++)
             {
-                if (ImGui.Selectable($"{i}x", i == config.ResolutionScale))
+                var overCap = i > maxScale;
+                if (ImGui.Selectable($"{i}x", i == config.ResolutionScale,
+                        overCap ? ImGuiSelectableFlags.Disabled : ImGuiSelectableFlags.None))
                 {
                     config.ResolutionScale = i;
                     SaveConfig();
@@ -1200,6 +1212,11 @@ public sealed class EmulatorService : IDisposable
             }
 
             ImGui.EndCombo();
+        }
+
+        if (maxScale < MaxScale)
+        {
+            DrawInsetTextDisabled($"PS2 is capped at {Ps2MaxScale}x resolution scale.");
         }
 
         var showFps = config.ShowFps;
@@ -2402,32 +2419,8 @@ public sealed class EmulatorService : IDisposable
         {
             try
             {
-                using var ws = new System.Net.WebSockets.ClientWebSocket();
-                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
-                await ws.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), cts.Token);
-
-                var json = new ControlMsg { Action = "register", Uid = uid, Name = name }.ToJson();
-                await ws.SendAsync(
-                    new ArraySegment<byte>(System.Text.Encoding.UTF8.GetBytes(json)),
-                    System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
-
-                var buffer = new byte[4096];
-                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                var msg = result.MessageType == System.Net.WebSockets.WebSocketMessageType.Text
-                    ? ControlMsg.Parse(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count))
-                    : null;
-
-                if (msg?.Type == "registered" && !string.IsNullOrEmpty(msg.PlayerId))
-                {
-                    config.PlayerId = msg.PlayerId;
-                    config.PlayerIdUid = uid;
-                    SaveConfig();
-                    log.Information($"[Sync] player ID registered: {msg.PlayerId}");
-                }
-                else
-                {
-                    playerRegError = msg?.Message ?? "No response from relay";
-                }
+                if (await RegisterPlayerIdAsync(relayUrl, uid, name) == null)
+                    playerRegError = "No response from relay";
             }
             catch (Exception ex)
             {
@@ -2438,6 +2431,40 @@ public sealed class EmulatorService : IDisposable
                 playerRegistering = false;
             }
         });
+    }
+
+    // One register round-trip against the relay; returns the issued player ID
+    // and persists it to config. Register is idempotent on the relay, which is
+    // what lets RelayPresence heal a saved ID the relay no longer knows.
+    private async System.Threading.Tasks.Task<string?> RegisterPlayerIdAsync(
+        string relayUrl, string uid, string name)
+    {
+        using var ws = new System.Net.WebSockets.ClientWebSocket();
+        using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await ws.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), cts.Token);
+
+        var json = new ControlMsg { Action = "register", Uid = uid, Name = name }.ToJson();
+        await ws.SendAsync(
+            new ArraySegment<byte>(System.Text.Encoding.UTF8.GetBytes(json)),
+            System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+        var buffer = new byte[4096];
+        var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+        var msg = result.MessageType == System.Net.WebSockets.WebSocketMessageType.Text
+            ? ControlMsg.Parse(System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count))
+            : null;
+
+        if (msg?.Type == "registered" && !string.IsNullOrEmpty(msg.PlayerId))
+        {
+            config.PlayerId = msg.PlayerId;
+            config.PlayerIdUid = uid;
+            SaveConfig();
+            log.Information($"[Sync] player ID registered: {msg.PlayerId}");
+            return msg.PlayerId;
+        }
+
+        playerRegError = msg?.Message ?? "No response from relay";
+        return null;
     }
 
     // Poll the relay for which synced friends are live (every few seconds).

@@ -18,6 +18,11 @@ public sealed class RelayPresence : IDisposable
 
     private readonly Action<string> log;
 
+    // Returns the player ID the relay issued for (relayUrl, uid, name), or
+    // null. Registration is idempotent on the relay, so it doubles as the
+    // self-heal when a saved ID is rejected after a relay registry reset.
+    private readonly Func<string, string, string, Task<string?>>? reRegister;
+
     private ClientWebSocket? ws;
     private CancellationTokenSource? cts;
     private Task? loop;
@@ -28,9 +33,11 @@ public sealed class RelayPresence : IDisposable
 
     public bool IsConnected { get; private set; }
 
-    public RelayPresence(Action<string> log)
+    public RelayPresence(Action<string> log,
+        Func<string, string, string, Task<string?>>? reRegister = null)
     {
         this.log = log;
+        this.reRegister = reRegister;
     }
 
     public List<OnlinePlayerInfo> GetOnline()
@@ -82,22 +89,42 @@ public sealed class RelayPresence : IDisposable
                 ws = socket;
                 await socket.ConnectAsync(new Uri(relayUrl.TrimEnd('/') + "/ws"), token);
 
-                var presence = new ControlMsg
-                {
-                    Action = "presence",
-                    Uid = uid,
-                    PlayerId = playerId,
-                    Name = name,
-                }.ToJson();
-                await socket.SendAsync(
-                    new ArraySegment<byte>(Encoding.UTF8.GetBytes(presence)),
-                    WebSocketMessageType.Text, true, token);
-
                 var buffer = new byte[16384];
-                var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                var ack = result.MessageType == WebSocketMessageType.Text
-                    ? ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count))
-                    : null;
+
+                async Task<ControlMsg?> SendPresenceAsync()
+                {
+                    await socket.SendAsync(
+                        new ArraySegment<byte>(Encoding.UTF8.GetBytes(new ControlMsg
+                        {
+                            Action = "presence",
+                            Uid = uid,
+                            PlayerId = playerId,
+                            Name = name,
+                        }.ToJson())),
+                        WebSocketMessageType.Text, true, token);
+
+                    var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    return result.MessageType == WebSocketMessageType.Text
+                        ? ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count))
+                        : null;
+                }
+
+                var ack = await SendPresenceAsync();
+
+                // A relay restart or rebuild can wipe the server registry; the saved
+                // ID then reads "Not registered" and this loop would spin on the
+                // slow retry forever. Claim the ID again (idempotent on the relay)
+                // and retry the handshake once before falling back.
+                if (ack?.Type == "error" && ack.Message == "Not registered" && reRegister != null)
+                {
+                    var reissued = await reRegister(relayUrl, uid, name);
+                    if (!string.IsNullOrEmpty(reissued) && reissued != playerId)
+                    {
+                        playerId = reissued;
+                        ack = await SendPresenceAsync();
+                    }
+                }
+
                 if (ack?.Type != "presence_ok")
                 {
                     log($"Presence rejected: {ack?.Message ?? "no ack"}");
@@ -114,10 +141,10 @@ public sealed class RelayPresence : IDisposable
                             new ControlMsg { Action = "list_online" }.ToJson())),
                         WebSocketMessageType.Text, true, token);
 
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                    if (result.MessageType == WebSocketMessageType.Text)
+                    var poll = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    if (poll.MessageType == WebSocketMessageType.Text)
                     {
-                        var msg = ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                        var msg = ControlMsg.Parse(Encoding.UTF8.GetString(buffer, 0, poll.Count));
                         if (msg?.Type == "online" && msg.Online != null)
                         {
                             lock (stateLock)

@@ -22,6 +22,9 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
         var file when file.Contains("lrps2", StringComparison.OrdinalIgnoreCase) => "PS2",
         _ => string.IsNullOrEmpty(Version) ? Name : $"{Name} {Version}",
     };
+
+    // PS2 frames are heavy to upscale; the frontend caps the display scale for these cores.
+    public bool IsPs2 => DisplayName == "PS2";
 }
 
 // Discovers libretro core DLLs by scanning the plugin's cores/ subdirectory (and the plugin
