@@ -90,12 +90,18 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             // Dalamud stores the settings json beside the data directory
-            // (pluginConfigs\<name>.json), not inside it.
+            // (pluginConfigs\<name>.json), not inside it. The $type values
+            // carry the old assembly-qualified names and would fail to bind
+            // on load, so they are rewritten during the move.
             var oldConfig = Path.Combine(parentDir, "SnesEmulator.json");
             var newConfig = Path.Combine(parentDir, "RetroXIV.json");
             if (File.Exists(oldConfig) && !File.Exists(newConfig))
             {
-                File.Move(oldConfig, newConfig);
+                var json = File.ReadAllText(oldConfig)
+                    .Replace("SnesEmulator.Configuration, SnesEmulator", "RetroXIV.Configuration, RetroXIV")
+                    .Replace("SnesEmulator.SyncFriend, SnesEmulator", "RetroXIV.SyncFriend, RetroXIV");
+                File.WriteAllText(newConfig, json);
+                File.Delete(oldConfig);
                 migrated = true;
             }
 
