@@ -14,6 +14,7 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
     {
         var file when file.Contains("bsnes", StringComparison.OrdinalIgnoreCase) => "SNES",
         var file when file.Contains("blastem", StringComparison.OrdinalIgnoreCase) => "Sega",
+        var file when file.Contains("fceumm", StringComparison.OrdinalIgnoreCase) => "NES",
         var file when file.Contains("mgba", StringComparison.OrdinalIgnoreCase) => "GBA",
         var file when file.Contains("gambatte", StringComparison.OrdinalIgnoreCase) => "GB/GBC",
         var file when file.Contains("mednafen_psx", StringComparison.OrdinalIgnoreCase) => "PS1",

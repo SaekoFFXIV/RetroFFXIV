@@ -88,6 +88,9 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private static readonly (string Library, float Aspect)[] builtinAspects =
     {
         ("Gambatte", 10f / 9f),
+        // The NES panel is 256x240 with 8:7 pixels; keep it from stretching
+        // to the legacy 3:2 world-screen fallback when the core reports 0.
+        ("FCEUmm", 8f / 7f),
     };
 
     // Frontend-set option values (future options UI, diagnostics). Applied at
