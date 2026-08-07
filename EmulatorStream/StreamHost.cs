@@ -574,6 +574,15 @@ internal sealed class StereoResampler
         }
 
         pos -= srcFrames;
+
+        // The lookahead convention leaves a negative residual whenever
+        // step >= 1 (every 48 kHz core — SNES and PS2 both): the next
+        // output would index before the buffer start, which threw and
+        // silently killed the stream audio loop. Clamp to zero — a
+        // sub-sample phase nudge per chunk, inaudible.
+        if (pos < 0)
+            pos = 0;
+
         return o;
     }
 }
