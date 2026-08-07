@@ -25,6 +25,11 @@ public sealed class InputManager
 
     private ushort joypad;
     private ushort remoteJoypad;
+    // Analog snapshot for cores that plug in RETRO_DEVICE_ANALOG (PS1/PS2).
+    // Sticks in libretro convention: X positive right, Y positive DOWN.
+    private short analogLeftX, analogLeftY, analogRightX, analogRightY;
+    // Trigger pressure, 0..32767 (reported via RETRO_DEVICE_INDEX_ANALOG_BUTTON).
+    private short analogL2, analogR2;
     private volatile bool escapeRequested;
 
     public bool EscapeRequested => escapeRequested;
@@ -78,6 +83,8 @@ public sealed class InputManager
             lock (stateLock)
             {
                 joypad = 0;
+                analogLeftX = analogLeftY = analogRightX = analogRightY = 0;
+                analogL2 = analogR2 = 0;
             }
 
             return;
@@ -87,9 +94,38 @@ public sealed class InputManager
         var gp = config.InputMode != InputMode.Keyboard ? ReadGamepad() : (ushort)0;
         var state = (ushort)(kb | gp);
         escapeRequested = gamepadReader.Down(GamepadReader.LeftThumb) && gamepadReader.Down(GamepadReader.RightThumb);
+
+        // Analog sticks + trigger pressure for analog cores. The digital
+        // RetroPad above stays answered either way.
+        var kbUse = config.InputMode != InputMode.Controller;
+        var gpUse = config.InputMode != InputMode.Keyboard;
+        var (lx, ly) = BlendAnalog(
+            kbUse ? ReadKeyboardStick() : (0f, 0f),
+            gpUse ? ApplyDeadzone(gamepadReader.LeftStickX, -gamepadReader.LeftStickY) : (0f, 0f));
+        var (rx, ry) = gpUse
+            ? ApplyDeadzone(gamepadReader.RightStickX, -gamepadReader.RightStickY)
+            : (0f, 0f);
+
+        var l2 = gpUse ? gamepadReader.LeftTriggerValue : 0f;
+        var r2 = gpUse ? gamepadReader.RightTriggerValue : 0f;
+        if (kbUse)
+        {
+            // Keys pull the triggers fully (the standard keyboard path).
+            if (config.KeyBindings.TryGetValue(nameof(SnesButton.L2), out var l2Key) && KeyDown(l2Key))
+                l2 = 1f;
+            if (config.KeyBindings.TryGetValue(nameof(SnesButton.R2), out var r2Key) && KeyDown(r2Key))
+                r2 = 1f;
+        }
+
         lock (stateLock)
         {
             joypad = state;
+            analogLeftX = AxisToRetro(lx);
+            analogLeftY = AxisToRetro(ly);
+            analogRightX = AxisToRetro(rx);
+            analogRightY = AxisToRetro(ry);
+            analogL2 = (short)Math.Clamp(Math.Round(l2 * 32767f), 0, 32767);
+            analogR2 = (short)Math.Clamp(Math.Round(r2 * 32767f), 0, 32767);
         }
     }
 
@@ -115,16 +151,53 @@ public sealed class InputManager
     // the other port reads the remote player's networked input.
     public short GetInputState(uint port, uint device, uint index, uint id)
     {
-        if (device != Libretro.DeviceJoypad || id > 15)
+        if (device == Libretro.DeviceJoypad && id <= 15)
         {
-            return 0;
+            lock (stateLock)
+            {
+                var state = port == (uint)LocalPort ? joypad : remoteJoypad;
+                return (short)((state >> (int)id) & 1);
+            }
         }
 
-        lock (stateLock)
+        if (device == Libretro.DeviceAnalog)
         {
-            var state = port == (uint)LocalPort ? joypad : remoteJoypad;
-            return (short)((state >> (int)id) & 1);
+            // Netplay syncs the digital joypad only; the remote port has no
+            // analog source.
+            if (port != (uint)LocalPort)
+            {
+                return 0;
+            }
+
+            lock (stateLock)
+            {
+                return index switch
+                {
+                    Libretro.AnalogIndexLeft => id switch
+                    {
+                        Libretro.AnalogIdX => analogLeftX,
+                        Libretro.AnalogIdY => analogLeftY,
+                        _ => (short)0,
+                    },
+                    Libretro.AnalogIndexRight => id switch
+                    {
+                        Libretro.AnalogIdX => analogRightX,
+                        Libretro.AnalogIdY => analogRightY,
+                        _ => (short)0,
+                    },
+                    // Trigger pressure (L2 on X, R2 on Y).
+                    Libretro.AnalogIndexButton => id switch
+                    {
+                        Libretro.AnalogIdX => analogL2,
+                        Libretro.AnalogIdY => analogR2,
+                        _ => (short)0,
+                    },
+                    _ => 0,
+                };
+            }
         }
+
+        return 0;
     }
 
     private ushort ReadKeyboard()
@@ -180,6 +253,62 @@ public sealed class InputManager
 
         return state;
     }
+
+    // The four direction keys drive the left analog stick at full deflection
+    // (screen coordinates: +Y down, diagonals normalized) — the standard
+    // keyboard-analog mapping.
+    private (float X, float Y) ReadKeyboardStick()
+    {
+        var x = 0f;
+        var y = 0f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Left), out var left) && KeyDown(left)) x -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Right), out var right) && KeyDown(right)) x += 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Up), out var up) && KeyDown(up)) y -= 1f;
+        if (config.KeyBindings.TryGetValue(nameof(SnesButton.Down), out var down) && KeyDown(down)) y += 1f;
+
+        if (x != 0f && y != 0f)
+        {
+            x *= 0.70710678f;
+            y *= 0.70710678f;
+        }
+
+        return (x, y);
+    }
+
+    private const float AnalogDeadzone = 0.15f;
+
+    // Radial deadzone: kills rest drift, then rescales so deflection starts
+    // at 0 right outside the deadzone instead of jumping.
+    private static (float X, float Y) ApplyDeadzone(float x, float y)
+    {
+        var magnitude = MathF.Sqrt(x * x + y * y);
+        if (magnitude < AnalogDeadzone)
+        {
+            return (0f, 0f);
+        }
+
+        var scale = Math.Min((magnitude - AnalogDeadzone) / (1f - AnalogDeadzone), 1f) / magnitude;
+        return (x * scale, y * scale);
+    }
+
+    // Keyboard + stick add together (clamped), so holding a direction key
+    // while nudging the stick never cancels out.
+    private static (float X, float Y) BlendAnalog((float X, float Y) a, (float X, float Y) b)
+    {
+        var x = a.X + b.X;
+        var y = a.Y + b.Y;
+        var magnitude = MathF.Sqrt(x * x + y * y);
+        if (magnitude > 1f)
+        {
+            x /= magnitude;
+            y /= magnitude;
+        }
+
+        return (x, y);
+    }
+
+    private static short AxisToRetro(float value) =>
+        (short)Math.Clamp(Math.Round(value * 32767f), -32768f, 32767f);
 
     private static ushort Bit(uint joypadId) => (ushort)(1 << (int)joypadId);
 

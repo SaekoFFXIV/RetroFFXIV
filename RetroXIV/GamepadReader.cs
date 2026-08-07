@@ -41,6 +41,8 @@ public sealed class GamepadReader : IDisposable
     private volatile bool wgiOk;
     private volatile ushort wgiBtns;
     private volatile float wgiSX, wgiSY;
+    private volatile float wgiRX, wgiRY;
+    private volatile float wgiLT, wgiRT;
     private volatile string wgiDbg = "STA starting";
     private volatile bool wgiRun = true;
 
@@ -82,6 +84,10 @@ public sealed class GamepadReader : IDisposable
                     wgiBtns = btns;
                     wgiSX = (float)r.LeftThumbstickX;
                     wgiSY = (float)r.LeftThumbstickY;
+                    wgiRX = (float)r.RightThumbstickX;
+                    wgiRY = (float)r.RightThumbstickY;
+                    wgiLT = (float)r.LeftTrigger;
+                    wgiRT = (float)r.RightTrigger;
                     wgiOk = true;
                     wgiDbg = $"WGI ok 0x{(int)r.Buttons:X4}";
                 }
@@ -170,13 +176,14 @@ public sealed class GamepadReader : IDisposable
     private volatile bool hidOk;
     private volatile ushort hidBtns;
     private volatile float hidSX, hidSY;
+    private volatile float hidRX, hidRY;
     private volatile string hidDbg = "HID thread starting";
     private volatile bool hidRun = true;
     private volatile int dbgRawX, dbgRawY, dbgHat;
     private volatile string dbgBtns = "";
 
     // Discovered axis info for normalization.
-    private int xMin, xMax, yMin, yMax;
+    private int xMin, xMax, yMin, yMax, zMin, zMax, rzMin, rzMax;
 
     private void HidLoop()
     {
@@ -203,10 +210,13 @@ public sealed class GamepadReader : IDisposable
                     break;
                 }
 
-                ParseReport(ppd, buf, reportLen, out var btns, out var sx, out var sy);
+                ParseReport(ppd, buf, reportLen, out var btns, out var sx, out var sy,
+                    out var rx, out var ry);
                 hidBtns = btns;
                 hidSX = sx;
                 hidSY = sy;
+                hidRX = rx;
+                hidRY = ry;
                 hidOk = true;
                 hidDbg = $"HID 0x{btns:X4} s={sx:F2},{sy:F2} rawX={dbgRawX} rawY={dbgRawY} hat={dbgHat} btns=[{dbgBtns}] range={xMin}/{xMax},{yMin}/{yMax}";
             }
@@ -269,6 +279,7 @@ public sealed class GamepadReader : IDisposable
     private void DiscoverAxisRanges(IntPtr ppd)
     {
         xMin = -128; xMax = 127; yMin = -128; yMax = 127; // defaults
+        zMin = -128; zMax = 127; rzMin = -128; rzMax = 127;
 
         var count = (uint)32;
         var caps = new HidpValueCaps[count];
@@ -287,12 +298,23 @@ public sealed class GamepadReader : IDisposable
                 yMin = caps[i].LogicalMin;
                 yMax = caps[i].LogicalMax;
             }
+            if (caps[i].UsageMin == UsageZ || caps[i].UsageMax == UsageZ)
+            {
+                zMin = caps[i].LogicalMin;
+                zMax = caps[i].LogicalMax;
+            }
+            if (caps[i].UsageMin == UsageRz || caps[i].UsageMax == UsageRz)
+            {
+                rzMin = caps[i].LogicalMin;
+                rzMax = caps[i].LogicalMax;
+            }
         }
     }
 
-    private void ParseReport(IntPtr ppd, byte[] report, int len, out ushort btns, out float sx, out float sy)
+    private void ParseReport(IntPtr ppd, byte[] report, int len,
+        out ushort btns, out float sx, out float sy, out float rx, out float ry)
     {
-        btns = 0; sx = 0; sy = 0;
+        btns = 0; sx = 0; sy = 0; rx = 0; ry = 0;
 
         // Read axes via HID parser.
         if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageX, out var rawX, ppd, report, len) == HIDP_STATUS_SUCCESS)
@@ -306,6 +328,18 @@ public sealed class GamepadReader : IDisposable
             dbgRawY = rawY;
             var range = yMax - yMin;
             sy = range > 0 ? -((rawY - yMin) / (float)range * 2f - 1f) : 0; // invert Y
+        }
+
+        // Right stick (Z / Rz on most generic pads).
+        if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageZ, out var rawZ, ppd, report, len) == HIDP_STATUS_SUCCESS)
+        {
+            var range = zMax - zMin;
+            rx = range > 0 ? (rawZ - zMin) / (float)range * 2f - 1f : 0;
+        }
+        if (HidP_GetUsageValue(HidP_Input, 1, 0, UsageRz, out var rawRz, ppd, report, len) == HIDP_STATUS_SUCCESS)
+        {
+            var range = rzMax - rzMin;
+            ry = range > 0 ? -((rawRz - rzMin) / (float)range * 2f - 1f) : 0; // invert Y
         }
 
         // Read hat switch.
@@ -351,6 +385,8 @@ public sealed class GamepadReader : IDisposable
 
     private ushort buttons;
     private float leftStickX, leftStickY;
+    private float rightStickX, rightStickY;
+    private float leftTrigger, rightTrigger;
     public bool Connected { get; private set; }
     public ushort Buttons => Connected ? buttons : (ushort)0;
     public string DebugInfo { get; private set; } = "not polled";
@@ -380,6 +416,10 @@ public sealed class GamepadReader : IDisposable
                 buttons = btns;
                 leftStickX = xs.G.LX / 32768f;
                 leftStickY = xs.G.LY / 32768f;
+                rightStickX = xs.G.RX / 32768f;
+                rightStickY = xs.G.RY / 32768f;
+                leftTrigger = xs.G.LT / 255f;
+                rightTrigger = xs.G.RT / 255f;
                 DebugInfo = $"XInput slot {i}";
                 ActiveBackend = $"XInput slot {i}";
                 return;
@@ -392,6 +432,10 @@ public sealed class GamepadReader : IDisposable
             buttons = wgiBtns;
             leftStickX = wgiSX;
             leftStickY = wgiSY;
+            rightStickX = wgiRX;
+            rightStickY = wgiRY;
+            leftTrigger = wgiLT;
+            rightTrigger = wgiRT;
             DebugInfo = wgiDbg;
             ActiveBackend = "Windows Gaming Input";
             return;
@@ -403,6 +447,12 @@ public sealed class GamepadReader : IDisposable
             buttons = hidBtns;
             leftStickX = hidSX;
             leftStickY = hidSY;
+            rightStickX = hidRX;
+            rightStickY = hidRY;
+            // The raw-HID fallback has no portable trigger mapping; the
+            // digital threshold flags come through the button word instead.
+            leftTrigger = 0;
+            rightTrigger = 0;
             DebugInfo = hidDbg;
             ActiveBackend = "HID";
             return;
@@ -412,6 +462,10 @@ public sealed class GamepadReader : IDisposable
         buttons = 0;
         leftStickX = 0;
         leftStickY = 0;
+        rightStickX = 0;
+        rightStickY = 0;
+        leftTrigger = 0;
+        rightTrigger = 0;
         DebugInfo = $"{wgiDbg} | {hidDbg}";
         ActiveBackend = "none";
     }
@@ -419,6 +473,11 @@ public sealed class GamepadReader : IDisposable
     public bool Down(ushort button) => Connected && (buttons & button) != 0;
     public float LeftStickX => Connected ? leftStickX : 0f;
     public float LeftStickY => Connected ? leftStickY : 0f;
+    public float RightStickX => Connected ? rightStickX : 0f;
+    public float RightStickY => Connected ? rightStickY : 0f;
+    // Analog trigger pull, 0..1.
+    public float LeftTriggerValue => Connected ? leftTrigger : 0f;
+    public float RightTriggerValue => Connected ? rightTrigger : 0f;
 
     public void Dispose()
     {

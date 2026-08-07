@@ -1234,6 +1234,12 @@ public sealed class EmulatorService : IDisposable
         }
 
         DrawInsetText($"Emulator sees: {seen}");
+
+        if (selectedCore is { IsPs1: true } or { IsPs2: true })
+        {
+            DrawInsetTextDisabled("Analog: sticks and triggers map automatically on this core; "
+                + "direction keys also drive the left stick.");
+        }
     }
 
     private void DrawKeyboardTab()
@@ -1683,6 +1689,12 @@ public sealed class EmulatorService : IDisposable
             var resolvedPath = ResolveRomPath(romPath);
             if (core.LoadGame(resolvedPath))
             {
+                // Plug in the right controller type before the first playable
+                // frames: the DualShock subclass on PS1, plain analog on PS2,
+                // the RetroPad everywhere else.
+                core.SetControllerPortDevice(0, selectedCore?.PortDevice ?? Libretro.DeviceJoypad);
+                core.SetControllerPortDevice(1, selectedCore?.PortDevice ?? Libretro.DeviceJoypad);
+
                 screenOn = true;
                 crtAnimTarget = 1f;
                 StopAudio();

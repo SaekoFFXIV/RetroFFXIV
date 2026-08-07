@@ -27,6 +27,18 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
     // PS2 frames are heavy to upscale; the frontend caps the display scale for these cores.
     public bool IsPs2 => DisplayName == "PS2";
 
+    public bool IsPs1 => DisplayName == "PS1";
+
+    // The controller plugged into each port after load. Analog platforms get
+    // their analog device; Beetle PSX needs its own DualShock subclass — a
+    // plain RETRO_DEVICE_ANALOG hits its "unsupported device" default and
+    // unplugs the pad (verified headless). Digital consoles keep the RetroPad.
+    // The digital joypad is still answered on analog cores for menus.
+    public uint PortDevice =>
+        IsPs1 ? Libretro.DevicePsDualShock :
+        IsPs2 ? Libretro.DeviceAnalog :
+        Libretro.DeviceJoypad;
+
     // LRPS2's retro_unserialize access-violates the game process (three
     // in-game crashes reproduced on auto-load of a state the same core had
     // written), so the frontend gates save states off for PS2 cores. PS2

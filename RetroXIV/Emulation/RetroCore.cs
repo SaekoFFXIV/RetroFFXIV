@@ -33,6 +33,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private RetroSetAudioSampleBatchDelegate setAudioSampleBatch = null!;
     private RetroSetInputPollDelegate setInputPoll = null!;
     private RetroSetInputStateDelegate setInputState = null!;
+    private RetroSetControllerPortDeviceDelegate setControllerPortDevice = null!;
 
     // Callback delegate instances. These MUST live as fields: the native core holds raw pointers to
     // them, so if the GC collected them the next callback would jump into freed memory.
@@ -78,6 +79,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private static readonly Dictionary<string, string> builtinOverrides = new()
     {
         ["pcsx2_renderer"] = "Software (SW)",
+        // Beetle PSX ships DualShock support off ("disabled"). Boot the pad
+        // in analog mode so analog games see the sticks; the core's toggle
+        // combo (L1+R1+Select) still flips it back to digital mid-game.
+        ["beetle_psx_analog_toggle"] = "enabled-analog",
     };
 
     private readonly Dictionary<string, string> variableOverrides = new(builtinOverrides);
@@ -242,6 +247,7 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
         setAudioSampleBatch = Resolve<RetroSetAudioSampleBatchDelegate>("retro_set_audio_sample_batch");
         setInputPoll = Resolve<RetroSetInputPollDelegate>("retro_set_input_poll");
         setInputState = Resolve<RetroSetInputStateDelegate>("retro_set_input_state");
+        setControllerPortDevice = Resolve<RetroSetControllerPortDeviceDelegate>("retro_set_controller_port_device");
         serializeSize = Resolve<RetroSerializeSizeDelegate>("retro_serialize_size");
         serialize = Resolve<RetroSerializeDelegate>("retro_serialize");
         unserialize = Resolve<RetroUnserializeDelegate>("retro_unserialize");
@@ -1121,6 +1127,20 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private short InputStateCallback(uint port, uint device, uint index, uint id)
     {
         return InputState?.Invoke(port, device, index, id) ?? 0;
+    }
+
+    // Selects the controller type plugged into a port. Analog-capable cores
+    // (PS1/PS2) need RETRO_DEVICE_ANALOG to see the sticks at all; digital
+    // consoles keep the plain RETRO_DEVICE_JOYPAD. Call after LoadGame —
+    // RetroArch makes the same call after retro_load_game.
+    public void SetControllerPortDevice(uint port, uint device)
+    {
+        if (library == IntPtr.Zero)
+        {
+            return;
+        }
+
+        setControllerPortDevice(port, device);
     }
 
     // Formats the core's printf-style log line natively (the va_list pointer

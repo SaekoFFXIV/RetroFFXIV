@@ -56,6 +56,15 @@ public static class Libretro
     public const uint DeviceJoypad = 1;
     public const uint DeviceAnalog = 5;
 
+    // RETRO_DEVICE_SUBCLASS(base, id) from libretro.h. Cores like Beetle PSX
+    // declare their pad family as analog subclasses — plain RETRO_DEVICE_ANALOG
+    // is not one of them and falls into the core's "unplugged" default.
+    public static uint DeviceSubclass(uint baseDevice, uint id) =>
+        ((id + 1) << 8) | baseDevice;
+
+    // Beetle PSX pad types (RETRO_DEVICE_PS_* in its input.c).
+    public static uint DevicePsDualShock => DeviceSubclass(DeviceAnalog, 1);
+
     // Joypad button IDs (RETRO_DEVICE_ID_JOYPAD_*).
     public const uint JoypadB = 0;
     public const uint JoypadY = 1;
@@ -77,6 +86,8 @@ public static class Libretro
     // Analog stick indices.
     public const uint AnalogIndexLeft = 0;
     public const uint AnalogIndexRight = 1;
+    // Analog pressure for L2/R2-style triggers ( queried as X / Y).
+    public const uint AnalogIndexButton = 2;
     public const uint AnalogIdX = 0;
     public const uint AnalogIdY = 1;
 
@@ -294,3 +305,6 @@ public delegate void RetroSetInputPollDelegate(RetroInputPollDelegate cb);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 public delegate void RetroSetInputStateDelegate(RetroInputStateDelegate cb);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+public delegate void RetroSetControllerPortDeviceDelegate(uint port, uint device);
