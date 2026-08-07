@@ -25,6 +25,12 @@ public sealed record CoreInfo(string Path, string Name, string Version, string[]
 
     // PS2 frames are heavy to upscale; the frontend caps the display scale for these cores.
     public bool IsPs2 => DisplayName == "PS2";
+
+    // LRPS2's retro_unserialize access-violates the game process (three
+    // in-game crashes reproduced on auto-load of a state the same core had
+    // written), so the frontend gates save states off for PS2 cores. PS2
+    // games save through memory cards instead.
+    public bool SupportsSaveStates => !IsPs2;
 }
 
 // Discovers libretro core DLLs by scanning the plugin's cores/ subdirectory (and the plugin

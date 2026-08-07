@@ -97,6 +97,17 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     private Thread? thread;
     private volatile bool running;
 
+    // How long to wait for the emulation thread to leave native code during
+    // teardown before giving up on an orderly unload.
+    private const int TeardownJoinTimeoutMs = 3000;
+
+    // Set when the emulation thread did not stop in time. The core and its
+    // native library are deliberately left loaded for the rest of the process
+    // lifetime, because freeing anything under a live retro_run thread would
+    // crash the game.
+    private bool teardownFailed;
+    public bool TeardownFailed => teardownFailed;
+
     // Set to pause/resume the emulation (e.g. when the TV screen is powered off).
     public volatile bool Paused;
 
@@ -140,6 +151,10 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     // Background-thread failures must be reported, never allowed to reach
     // AppDomain.UnhandledException (Dalamud treats that as a process crash).
     public Action<Exception>? BackgroundError { get; set; }
+
+    // Raised when teardown has to leave the core loaded because the emulation
+    // thread would not stop; informational, the process is deliberately kept alive.
+    public Action<string>? TeardownWarning { get; set; }
 
     // Core log lines (retro_log_level, text), emitted from the emulation
     // thread.
@@ -262,6 +277,12 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             throw new InvalidOperationException("No core loaded.");
         }
 
+        if (teardownFailed)
+        {
+            LastLoadError = "The previous session did not stop cleanly; restart the game to use this core again.";
+            return false;
+        }
+
         UnloadGame();
         LastLoadError = null;
 
@@ -369,6 +390,11 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
             throw new InvalidOperationException("No core loaded.");
         }
 
+        if (teardownFailed)
+        {
+            return false;
+        }
+
         UnloadGame();
 
         RetroGameInfo gameInfo = default;
@@ -419,7 +445,9 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     // Begin running the emulation on its own thread.
     public void Start()
     {
-        if (running)
+        // A poisoned core still has a thread inside native code; starting
+        // another would run two retro_run callers against the same core.
+        if (running || teardownFailed)
         {
             return;
         }
@@ -431,8 +459,23 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
 
     public void UnloadGame()
     {
+        if (teardownFailed)
+        {
+            return;
+        }
+
         running = false;
-        thread?.Join(1000);
+        if (thread?.Join(TeardownJoinTimeoutMs) == false)
+        {
+            // The emulation thread is still inside native core code (a long
+            // frame, a stalled netplay send). Tearing down under it would
+            // crash the game, so leave the core loaded and surface it.
+            teardownFailed = true;
+            TeardownWarning?.Invoke(
+                "The emulator thread did not stop in time; the core was left loaded to avoid crashing the game. Restart the game to unload it fully.");
+            return;
+        }
+
         thread = null;
 
         if (IsGameLoaded)
@@ -1106,6 +1149,16 @@ public sealed class RetroCore : IDisposable, IEmulatorBackend
     public void Dispose()
     {
         UnloadGame();
+
+        if (teardownFailed)
+        {
+            // The emulation thread is presumed alive inside the native core:
+            // leave the library mapped and every pointer it may hand the core
+            // allocated. The process is deliberately kept alive with the core
+            // loaded rather than crashing on a use-after-free.
+            return;
+        }
+
         FreeVariables();
 
         if (library != IntPtr.Zero)

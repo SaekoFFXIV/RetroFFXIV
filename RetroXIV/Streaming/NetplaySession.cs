@@ -159,7 +159,11 @@ internal sealed class NetplaySession : IDisposable
 
         try
         {
-            ws.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, CancellationToken.None)
+            // Bound the send: it runs on the emulation thread while holding
+            // the core gate, so a stalled relay must not block indefinitely
+            // (that would hang save states and plugin unload too).
+            using var sendCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            ws.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, sendCts.Token)
               .GetAwaiter().GetResult();
         }
         catch

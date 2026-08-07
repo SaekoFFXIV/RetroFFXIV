@@ -105,6 +105,10 @@ public sealed class EmulatorService : IDisposable
     // The effective scale cap for the current core. The saved config value is left untouched,
     // so switching back to a non-PS2 core restores the player's preferred scale.
     private int CurrentMaxScale => selectedCore is { IsPs2: true } ? Ps2MaxScale : MaxScale;
+
+    // Save states are gated off where the core cannot round-trip them safely
+    // (LRPS2 crashes the process on unserialize); see CoreInfo.SupportsSaveStates.
+    private bool StatesSupported => selectedCore is not { SupportsSaveStates: false };
     private readonly XivAuthService xivAuth;
     private readonly StreamConfig streamConfig;
     private StreamPanel? streamPanel;
@@ -962,6 +966,12 @@ public sealed class EmulatorService : IDisposable
             return;
         }
 
+        if (!StatesSupported)
+        {
+            ImGui.TextWrapped("Save states are not available for PS2 games; progress saves to the memory card instead.");
+            return;
+        }
+
         ImGui.TextWrapped("4 save slots per game. The game also auto-saves when the plugin closes and resumes on load.");
         ImGui.Separator();
 
@@ -1005,6 +1015,12 @@ public sealed class EmulatorService : IDisposable
             return;
         }
 
+        if (!StatesSupported)
+        {
+            saveStateStatus = "Save states are not available for this core.";
+            return;
+        }
+
         var data = core.SaveState();
         if (data == null)
         {
@@ -1029,6 +1045,12 @@ public sealed class EmulatorService : IDisposable
     {
         if (core is not { IsGameLoaded: true })
         {
+            return;
+        }
+
+        if (!StatesSupported)
+        {
+            saveStateStatus = "Save states are not available for this core.";
             return;
         }
 
@@ -1058,6 +1080,13 @@ public sealed class EmulatorService : IDisposable
             return false;
         }
 
+        // Never feed a stored state to a core that cannot round-trip it; for
+        // LRPS2 the unserialize itself crashes the game process.
+        if (!StatesSupported)
+        {
+            return false;
+        }
+
         if (!File.Exists(AutoSavePath))
         {
             return false;
@@ -1078,6 +1107,13 @@ public sealed class EmulatorService : IDisposable
     private void AutoSave()
     {
         if (core is not { IsGameLoaded: true } || string.IsNullOrEmpty(gameKey))
+        {
+            return;
+        }
+
+        // Writing a state the core cannot load back would poison the next
+        // boot for any plugin version that still auto-loads it.
+        if (!StatesSupported)
         {
             return;
         }
@@ -1453,6 +1489,11 @@ public sealed class EmulatorService : IDisposable
                 InputState = inputManager.GetInputState,
                 BackgroundError = ex => log.Error(ex,
                     "Emulator thread stopped after a contained core failure"),
+                TeardownWarning = msg =>
+                {
+                    log.Warning("[Core] {Msg}", msg);
+                    status = msg;
+                },
                 LogReceived = (level, text) =>
                 {
                     switch (level)

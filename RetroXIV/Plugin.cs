@@ -62,34 +62,47 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     // The plugin was renamed from SnesEmulator; carry the old config directory
-    // (settings, saves, BIOS layout) over on first launch under the new name.
+    // (saves, BIOS layout) and the settings json over under the new name. Runs
+    // on every launch but only copies files that are still missing, so a
+    // partially failed migration resumes instead of staying stuck.
     private static void MigrateLegacyConfig()
     {
         try
         {
             var newDir = PluginInterface.ConfigDirectory;
-            var oldDir = Path.Combine(newDir.Parent!.FullName, "SnesEmulator");
-            if (!Directory.Exists(oldDir) || newDir.GetFiles().Length > 0)
+            var parentDir = newDir.Parent!.FullName;
+            var oldDir = Path.Combine(parentDir, "SnesEmulator");
+            var migrated = false;
+
+            if (Directory.Exists(oldDir))
             {
-                return;
+                foreach (var file in Directory.GetFiles(oldDir, "*", SearchOption.AllDirectories))
+                {
+                    var relative = Path.GetRelativePath(oldDir, file);
+                    var destination = Path.Combine(newDir.FullName, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                    if (!File.Exists(destination))
+                    {
+                        File.Copy(file, destination);
+                        migrated = true;
+                    }
+                }
             }
 
-            foreach (var file in Directory.GetFiles(oldDir, "*", SearchOption.AllDirectories))
-            {
-                var relative = Path.GetRelativePath(oldDir, file);
-                var destination = Path.Combine(newDir.FullName, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Copy(file, destination, overwrite: false);
-            }
-
-            var oldConfig = Path.Combine(newDir.FullName, "SnesEmulator.json");
-            var newConfig = Path.Combine(newDir.FullName, "RetroXIV.json");
+            // Dalamud stores the settings json beside the data directory
+            // (pluginConfigs\<name>.json), not inside it.
+            var oldConfig = Path.Combine(parentDir, "SnesEmulator.json");
+            var newConfig = Path.Combine(parentDir, "RetroXIV.json");
             if (File.Exists(oldConfig) && !File.Exists(newConfig))
             {
                 File.Move(oldConfig, newConfig);
+                migrated = true;
             }
 
-            Log.Information("Migrated legacy SnesEmulator config to {Dir}", newDir.FullName);
+            if (migrated)
+            {
+                Log.Information("Migrated legacy SnesEmulator config to {Dir}", newDir.FullName);
+            }
         }
         catch (Exception ex)
         {

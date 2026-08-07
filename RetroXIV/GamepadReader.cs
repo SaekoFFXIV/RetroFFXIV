@@ -357,11 +357,11 @@ public sealed class GamepadReader : IDisposable
 
     public GamepadReader()
     {
-        var wgi = new Thread(WgiLoop) { IsBackground = true, Name = "SnesEmu.Wgi" };
+        var wgi = new Thread(WgiLoop) { IsBackground = true, Name = "RetroXIV.Wgi" };
         wgi.SetApartmentState(ApartmentState.STA);
         wgi.Start();
 
-        var hid = new Thread(HidLoop) { IsBackground = true, Name = "SnesEmu.Hid" };
+        var hid = new Thread(HidLoop) { IsBackground = true, Name = "RetroXIV.Hid" };
         hid.Start();
     }
 
