@@ -359,10 +359,21 @@ public sealed class EmulatorService : IDisposable
         }
     }
 
+    private bool lastGamepadConnected;
+
     private void OnFrameworkUpdate(IFramework fw)
     {
         // Poll gamepad on the UI thread (WinRT requirement).
         inputManager.PollGamepad();
+
+        var gpConnected = inputManager.Gamepad.Connected;
+        if (gpConnected != lastGamepadConnected)
+        {
+            lastGamepadConnected = gpConnected;
+            log.Information("[Input] Controller {State} ({Detail})",
+                gpConnected ? "connected" : "disconnected",
+                inputManager.Gamepad.DebugInfo);
+        }
 
         if (core is not { IsGameLoaded: true })
         {
@@ -707,6 +718,10 @@ public sealed class EmulatorService : IDisposable
 
             case 1:
                 BeginTabContent("##controls_tab_content");
+                DrawInputStatus();
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
                 DrawInsetTextColored(new Vector4(0.36f, 0.78f, 0.92f, 1f), "Input bindings");
                 DrawInsetTextDisabled("Select a field to rebind. Right-click restores its default.");
                 ImGui.Spacing();
@@ -1133,6 +1148,77 @@ public sealed class EmulatorService : IDisposable
         {
             log.Error(ex, "Failed to auto-save state");
         }
+    }
+
+    private static readonly (uint Id, string Name)[] JoypadDebugNames =
+    {
+        (Libretro.JoypadUp, "Up"), (Libretro.JoypadDown, "Down"),
+        (Libretro.JoypadLeft, "Left"), (Libretro.JoypadRight, "Right"),
+        (Libretro.JoypadA, "A"), (Libretro.JoypadB, "B"),
+        (Libretro.JoypadX, "X"), (Libretro.JoypadY, "Y"),
+        (Libretro.JoypadL, "L"), (Libretro.JoypadR, "R"),
+        (Libretro.JoypadL2, "L2"), (Libretro.JoypadR2, "R2"),
+        (Libretro.JoypadL3, "L3"), (Libretro.JoypadR3, "R3"),
+        (Libretro.JoypadStart, "Start"), (Libretro.JoypadSelect, "Select"),
+    };
+
+    // Live readout of the input pipeline: mode, window focus, controller
+    // detection (and which backend sees it), and what the emulator is
+    // actually receiving this frame.
+    private void DrawInputStatus()
+    {
+        DrawSectionHeading("Status", "live");
+
+        var modeName = config.InputMode switch
+        {
+            InputMode.Keyboard => "Keyboard only",
+            InputMode.Controller => "Controller only",
+            _ => "Both",
+        };
+        DrawInsetText($"Input mode: {modeName}");
+        if (config.InputMode != InputMode.Both)
+        {
+            DrawInsetTextDisabled("Both is recommended; the other device is ignored entirely.");
+        }
+
+        DrawInsetText(focused
+            ? "Window: focused — input drives the emulator"
+            : "Window: not focused — click the screen first");
+
+        var gp = inputManager.Gamepad;
+        if (gp.Connected)
+        {
+            DrawInsetText($"Controller: {gp.ActiveBackend} "
+                          + $"(stick {gp.LeftStickX:F2}, {gp.LeftStickY:F2})");
+        }
+        else
+        {
+            DrawInsetTextColored(new Vector4(1f, 0.55f, 0.45f, 1f),
+                "Controller: none detected");
+            DrawInsetTextDisabled(gp.DebugInfo);
+        }
+
+        var live = inputManager.GetLocalJoypad();
+        string seen;
+        if (live == 0)
+        {
+            seen = "nothing";
+        }
+        else
+        {
+            var names = new System.Collections.Generic.List<string>();
+            foreach (var (id, name) in JoypadDebugNames)
+            {
+                if ((live & (1 << (int)id)) != 0)
+                {
+                    names.Add(name);
+                }
+            }
+
+            seen = string.Join(" ", names);
+        }
+
+        DrawInsetText($"Emulator sees: {seen}");
     }
 
     private void DrawKeyboardTab()

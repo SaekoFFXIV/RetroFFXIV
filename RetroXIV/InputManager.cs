@@ -150,7 +150,13 @@ public sealed class InputManager
     {
         ushort state = 0;
 
-        // D-Pad on the left stick (fixed).
+        // Directions come from the physical D-pad and the left stick (SNES-era
+        // fallback for pads without a usable D-pad); both are digital here.
+        if (gamepadReader.Down(GamepadReader.DPadUp)) state |= Bit(Libretro.JoypadUp);
+        if (gamepadReader.Down(GamepadReader.DPadDown)) state |= Bit(Libretro.JoypadDown);
+        if (gamepadReader.Down(GamepadReader.DPadLeft)) state |= Bit(Libretro.JoypadLeft);
+        if (gamepadReader.Down(GamepadReader.DPadRight)) state |= Bit(Libretro.JoypadRight);
+
         var stickX = gamepadReader.LeftStickX;
         var stickY = gamepadReader.LeftStickY;
         if (stickX < -StickThreshold) state |= Bit(Libretro.JoypadLeft);

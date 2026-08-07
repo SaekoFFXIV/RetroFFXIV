@@ -354,6 +354,8 @@ public sealed class GamepadReader : IDisposable
     public bool Connected { get; private set; }
     public ushort Buttons => Connected ? buttons : (ushort)0;
     public string DebugInfo { get; private set; } = "not polled";
+    // Short label of the backend currently providing state (for the UI).
+    public string ActiveBackend { get; private set; } = "none";
 
     public GamepadReader()
     {
@@ -379,6 +381,7 @@ public sealed class GamepadReader : IDisposable
                 leftStickX = xs.G.LX / 32768f;
                 leftStickY = xs.G.LY / 32768f;
                 DebugInfo = $"XInput slot {i}";
+                ActiveBackend = $"XInput slot {i}";
                 return;
             }
         }
@@ -390,6 +393,7 @@ public sealed class GamepadReader : IDisposable
             leftStickX = wgiSX;
             leftStickY = wgiSY;
             DebugInfo = wgiDbg;
+            ActiveBackend = "Windows Gaming Input";
             return;
         }
 
@@ -400,6 +404,7 @@ public sealed class GamepadReader : IDisposable
             leftStickX = hidSX;
             leftStickY = hidSY;
             DebugInfo = hidDbg;
+            ActiveBackend = "HID";
             return;
         }
 
@@ -408,6 +413,7 @@ public sealed class GamepadReader : IDisposable
         leftStickX = 0;
         leftStickY = 0;
         DebugInfo = $"{wgiDbg} | {hidDbg}";
+        ActiveBackend = "none";
     }
 
     public bool Down(ushort button) => Connected && (buttons & button) != 0;
